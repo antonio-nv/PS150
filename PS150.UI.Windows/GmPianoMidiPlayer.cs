@@ -237,15 +237,16 @@ namespace PS150.UI.Windows
                                 break;
 
                             case ControlChangeEvent volCc when volCc.ControlNumber == VolumeControlNumber:
-                                // Hlasitost ze souboru NEignorujeme úplně, jen ji
-                                // přeškálujeme podle naší hlavní hlasitosti (Vol:
-                                // ve VGA konzoli) - obojí se tak násobí dohromady.
-                                _outputDevice.SendEvent(new ControlChangeEvent(
-                                    (SevenBitNumber)VolumeControlNumber,
-                                    (SevenBitNumber)ScaleToMidiVolume(volCc.ControlValue))
-                                {
-                                    Channel = volCc.Channel
-                                });
+                                // ZKUŠEBNĚ ignorováno (stejně jako Pan a ProgramChange
+                                // výše) - dřív se tu hlasitost jednotlivé osnovy ze
+                                // souboru (CC7, včetně crescend/decrescend během
+                                // hraní) násobila s hlavní hlasitostí. Teď se
+                                // neposílá vůbec nic, takže kanálu zůstává napořád
+                                // ta pevná hodnota nastavená při startu přehrávání
+                                // (100 % × hlavní hlasitost z VGA konzole, viz výše
+                                // "Počáteční hlasitost..."). Zvuková dynamika
+                                // jednotlivých not (velocity) tímhle není dotčená -
+                                // řeší jen kanálovou/celkovou hlasitost.
                                 break;
 
                             case NoteOnEvent noteOn:

@@ -489,11 +489,16 @@ namespace PS150.UI.Windows
                     return false;
 
                 case ConsoleKey.Spacebar:
+                // X, C, V - staré zvyky z Winampu, stejná funkce jako mezerník.
+                case ConsoleKey.X:
+                case ConsoleKey.C:
+                case ConsoleKey.V:
                     TogglePlayPause();
                     break;
 
-                // PgDown -> Další soubor
+                // PgDown, nebo B (staré zvyky z Winampu) -> Další soubor
                 case ConsoleKey.PageDown:
+                case ConsoleKey.B:
                     {
                         string? nextFile = _navigator.GetNextFile();
                         if (nextFile != null)
@@ -504,8 +509,9 @@ namespace PS150.UI.Windows
                     }
                     break;
 
-                // PgUp -> Předchozí soubor
+                // PgUp, nebo Z (staré zvyky z Winampu) -> Předchozí soubor
                 case ConsoleKey.PageUp:
+                case ConsoleKey.Z:
                     {
                         string? prevFile = _navigator.GetPreviousFile();
                         if (prevFile != null)
