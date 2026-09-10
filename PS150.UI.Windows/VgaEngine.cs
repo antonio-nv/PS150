@@ -11,6 +11,29 @@ namespace PS150.UI.Windows
 {
     internal static class VgaEngine
     {
+        // Pevná šířka celého VGA okna ve znacích - VŠECHNO ostatní (oddělovací
+        // čáry, VU metry, wrapping cesty k souboru...) se od tohohle čísla
+        // odvíjí, ať se to na jednom místě dá později přeladit.
+        private const int ConsoleWidth = 30;
+        private const int ConsoleHeight = 45;
+
+        // DŮLEŽITÉ: nikdy nepoužívat ConsoleWidth přímo pro obsah řádku, který
+        // pak jde do Console.WriteLine()! Když text zaplní úplně celou šířku
+        // okna a hned za tím přijde odřádkování, Windows konzole si sama vloží
+        // fantomový prázdný řádek navíc (známá zvláštnost "delayed line wrap"),
+        // což při pevné výšce bufferu vynutí scroll o řádek a rozjede všechny
+        // absolutní SetCursorPosition souřadnice používané jinde v kódu -
+        // přesně tohle způsobovalo promíchané/utíkající řádky. Proto se u
+        // veškerého obsahu, po kterém následuje nový řádek, používá o 1 znak
+        // užší ContentWidth - poslední sloupec zůstává vždy prázdný.
+        private const int ContentWidth = ConsoleWidth - 1;
+
+        // Kolikátým řádkem začíná obsah pod cestou k souboru (metry / MIDI
+        // osnovy) - proměnlivé, protože cesta k souboru se teď zalamuje na
+        // víc řádků podle délky (viz WrapPath), na rozdíl od dřívějška, kdy
+        // to bylo natvrdo na řádku 7.
+        private static int _contentStartRow = 7;
+
         private static DirectoryNavigator _navigator = new();
         private static AudioPlayer _audioPlayer = new();
 
@@ -68,11 +91,40 @@ namespace PS150.UI.Windows
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        // --- Odstranění title baru + náhradní tažení myší za dekorativní
+        // horní okraj konzole (řádek y==0), viz použití v Run()/mouse handleru níž.
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll")]
+        private static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        private const int SW_MINIMIZE = 6;
+        private const int WS_THICKFRAME = 0x00040000; // "úchyt" pro tažení za okraj - taky pryč, ať jde velikost fixní
+
+        private const int GWL_STYLE = -16;
+        private const int WS_CAPTION = 0x00C00000;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_FRAMECHANGED = 0x0020;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+        private const int HT_CAPTION = 0x2;
+
         private const int STD_INPUT_HANDLE = -10;
         private const uint ENABLE_PROCESSED_INPUT = 0x0001;
         private const uint ENABLE_LINE_INPUT = 0x0002;
         private const uint ENABLE_ECHO_INPUT = 0x0004;
         private const uint ENABLE_MOUSE_INPUT = 0x0010;
+        private const uint ENABLE_QUICK_EDIT_MODE = 0x0040; // "QuickEdit" - VÝCHOZÍ ZAPNUTÉ na většině Windows instalací
         private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
         private const ushort MOUSE_EVENT = 0x0002;
         private const uint MOUSE_WHEELED = 0x0004;
@@ -88,7 +140,9 @@ namespace PS150.UI.Windows
         private static extern bool SetConsoleMode(IntPtr hConsoleInput, uint dwMode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool PeekConsoleInput(IntPtr hConsoleInput, [Out] INPUT_RECORD[] lpBuffer, uint nLength, out uint lpNumberOfEventsRead);
+        private static extern bool GetNumberOfConsoleInputEvents(IntPtr hConsoleInput, out uint lpNumberOfEvents);
+
+        private const ushort KEY_EVENT = 0x0001;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool ReadConsoleInput(IntPtr hConsoleInput, [Out] INPUT_RECORD[] lpBuffer, uint nLength, out uint lpNumberOfEventsRead);
@@ -175,6 +229,15 @@ namespace PS150.UI.Windows
             if (hwnd != IntPtr.Zero)
             {
                 SetForegroundWindow(hwnd);
+
+                // Sundat title bar (ikonka, titulek, Minimalizovat/Maximalizovat/Zavřít) -
+                // od téhle chvíle okno nejde tažením za horní pruh přesouvat standardní
+                // cestou. Náhrada je níž v mouse handleru (y==0 = náš vlastní textový
+                // title bar). WS_THICKFRAME pryč taky - ať nejde okno tažením za okraj
+                // zvětšit/zmenšit, velikost je teď pevně daná (viz ConsoleWidth/Height).
+                int style = GetWindowLong(hwnd, GWL_STYLE);
+                SetWindowLong(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME));
+                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
             }
 
             Console.OutputEncoding = Encoding.UTF8;
@@ -183,7 +246,15 @@ namespace PS150.UI.Windows
 
             try
             {
-                Console.SetBufferSize(Console.WindowWidth, Console.WindowHeight);
+                // Nejdřív zmenšit okno na minimum - Windows konzole si jinak
+                // stěžuje ("parameter is out of range"), pokud by se nová
+                // šířka bufferu měla nastavit menší, než je aktuální velikost
+                // okna (a naopak). Zmenšením na 1x1 napřed se týhle
+                // kombinaci vždycky vyhneme, ať už uživatel měl konzoli
+                // předtím jakkoliv velkou.
+                Console.SetWindowSize(1, 1);
+                Console.SetBufferSize(ConsoleWidth, ConsoleHeight);
+                Console.SetWindowSize(ConsoleWidth, ConsoleHeight);
             }
             catch { }
 
@@ -192,8 +263,14 @@ namespace PS150.UI.Windows
             if (GetConsoleMode(hInput, out uint mode))
             {
                 mode |= ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS;
-                // Vypneme řádkový vstup a echo, aby klávesnice reagovala okamžitě
-                mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+                // ENABLE_QUICK_EDIT_MODE (0x0040) je na většině Windows instalací
+                // ve výchozím nastavení konzole ZAPNUTÉ - a dokud zůstane, Windows
+                // si tažení myší a Ctrl+C bere pro sebe (výběr/kopírování textu)
+                // dřív, než se k nám vůbec dostane jako MOUSE_EVENT. Musí se
+                // VYPNOUT výslovně (nestačí ho jen "nezapínat") a zároveň musí
+                // zůstat nastavené ENABLE_EXTENDED_FLAGS - jinak Windows tuhle
+                // změnu potichu ignoruje.
+                mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE);
                 SetConsoleMode(hInput, mode);
             }
 
@@ -206,47 +283,72 @@ namespace PS150.UI.Windows
             RenderDashboard();
 
             bool running = true;
-            INPUT_RECORD[] recordBuffer = new INPUT_RECORD[1];
 
             while (running)
             {
-                // A) Čtení klávesnice přes standardní .NET Console API (100% spolehlivé)
-                while (Console.KeyAvailable)
+                // A)+B) Čtení VŠECH čekajících událostí (klávesnice i myš)
+                // JEDNÍM stejným Win32 mechanismem. Dřív se klávesnice četla
+                // přes .NET Console.ReadKey() a myš zvlášť přes syrové Win32
+                // volání na STEJNÉM vstupním handle - to jsou ale dvě
+                // vzájemně nekompatibilní cesty čtení ze stejné fronty a
+                // kombinace obou nespolehlivě "krade" události druhé straně
+                // (tím se ztrácely myší události). Teď se čte výhradně
+                // tudy, pro oba typy vstupu stejně - ConsoleKey hodnoty
+                // jsou navržené tak, že přímo odpovídají Windows Virtual-Key
+                // kódům, takže wVirtualKeyCode jde na ConsoleKey přetypovat
+                // rovnou, beze ztráty.
+                GetNumberOfConsoleInputEvents(hInput, out uint pending);
+                if (pending > 0)
                 {
-                    var keyInfo = Console.ReadKey(true);
-                    running = HandleInput(keyInfo.Key);
-                    RenderDashboard();
-                    if (!running) break;
-                }
+                    var buffer = new INPUT_RECORD[pending];
+                    ReadConsoleInput(hInput, buffer, pending, out uint eventsRead);
 
-                if (!running) break;
-
-                // B) Zpracování myši (Kolečko + Kliky)
-                PeekConsoleInput(hInput, recordBuffer, 1, out uint eventsRead);
-                if (eventsRead > 0)
-                {
-                    ReadConsoleInput(hInput, recordBuffer, 1, out _);
-                    var record = recordBuffer[0];
-
-                    // Kolečko myši
-                    if (record.EventType == MOUSE_EVENT && record.MouseEvent.dwEventFlags == MOUSE_WHEELED)
+                    for (int i = 0; i < eventsRead && running; i++)
                     {
-                        int scrollDelta = (int)record.MouseEvent.dwButtonState >> 16;
-                        ChangeVolume(scrollDelta > 0 ? 5 : -5);
-                        RenderDashboard();
-                    }
-                    // Kliknutí myší (Levé tlačítko)
-                    else if (record.EventType == MOUSE_EVENT && record.MouseEvent.dwEventFlags == 0)
-                    {
-                        if ((record.MouseEvent.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0)
+                        var record = buffer[i];
+
+                        if (record.EventType == KEY_EVENT && record.KeyEvent.bKeyDown)
                         {
-                            HandleMouseClick(record.MouseEvent.dwMousePosition.X, record.MouseEvent.dwMousePosition.Y);
+                            running = HandleInput((ConsoleKey)record.KeyEvent.wVirtualKeyCode);
                             RenderDashboard();
+                        }
+                        else if (record.EventType == MOUSE_EVENT && record.MouseEvent.dwEventFlags == MOUSE_WHEELED)
+                        {
+                            int scrollDelta = (int)record.MouseEvent.dwButtonState >> 16;
+                            ChangeVolume(scrollDelta > 0 ? 5 : -5);
+                            RenderDashboard();
+                        }
+                        else if (record.EventType == MOUSE_EVENT && record.MouseEvent.dwEventFlags == 0)
+                        {
+                            if ((record.MouseEvent.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0)
+                            {
+                                short mx = record.MouseEvent.dwMousePosition.X;
+                                short my = record.MouseEvent.dwMousePosition.Y;
+
+                                if (my == 0)
+                                {
+                                    // Textový title bar - buď kliknutí na jeden z
+                                    // [_][□][X] ovladačů, nebo tažení za zbytek řádku.
+                                    running = HandleTitleBarClick(mx, hwnd);
+                                }
+                                else if (my == TransportButtonsRow && IsOnTransportButton(mx))
+                                {
+                                    HandleMouseClick(mx, my);
+                                }
+                                else if (hwnd != IntPtr.Zero)
+                                {
+                                    // Kdekoliv jinde na formuláři (cesta, metry, prázdné
+                                    // plochy...) -> tažení okna myší, stejný trik jako
+                                    // na title baru výše.
+                                    SendMessage(hwnd, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+                                }
+                                RenderDashboard();
+                            }
                         }
                     }
                 }
 
-                // C) Kontrola konce skladby -> AUTOMATICKÝ POSUN NA DALŠÍ SOUBOR
+                if (!running) break;
                 if (!_isMidiMode && !_isPaused && _audioPlayer.TotalTime > TimeSpan.Zero)
                 {
                     if (_audioPlayer.CurrentTime >= _audioPlayer.TotalTime - TimeSpan.FromMilliseconds(300))
@@ -325,23 +427,61 @@ namespace PS150.UI.Windows
             Console.CursorVisible = true;
         }
 
+        // Řádek s transportními tlačítky - musí sedět s RenderDashboard.
+        private const int TransportButtonsRow = 3;
+
+        private static bool IsOnTransportButton(short x) =>
+            (x >= 1 && x <= 4) || (x >= 6 && x <= 8) || (x >= 10 && x <= 12) || (x >= 14 && x <= 17);
+
+        // Title bar (řádek y==0) - vpravo tři ovladače [_][□][X], zbytek řádku
+        // slouží jako úchyt pro tažení okna. Přesné x-souřadnice odpovídají
+        // rozvržení v RenderDashboard (levý text + [_][□][X] zarovnané doprava).
+        private static bool HandleTitleBarClick(short x, IntPtr hwnd)
+        {
+            const string ctrlBlock = "[_][□][X]";
+            int ctrlStart = ContentWidth - ctrlBlock.Length; // musí sedět s paddingem v RenderDashboard
+
+            if (x >= ctrlStart && x <= ctrlStart + 2)          // [_]
+            {
+                if (hwnd != IntPtr.Zero) ShowWindow(hwnd, SW_MINIMIZE);
+            }
+            else if (x >= ctrlStart + 3 && x <= ctrlStart + 5) // [□] - záměrně vyřazeno, viz komentář u vykreslení
+            {
+                // Maximalizace u pevně velkého okna nedává smysl - tlačítko se
+                // zobrazuje jen jako vzhledová připomínka klasického title baru
+                // (vyšedivělé, viz RenderDashboard), klik na něj úmyslně nic nedělá.
+            }
+            else if (x >= ctrlStart + 6 && x <= ctrlStart + 8) // [X]
+            {
+                return false; // ukončí hlavní smyčku v Run() stejně jako Escape
+            }
+            else if (hwnd != IntPtr.Zero)
+            {
+                // Kdekoliv jinde na title baru -> tažení okna myší.
+                SendMessage(hwnd, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+            }
+            return true;
+        }
+
         private static void HandleMouseClick(short x, short y)
         {
-            if (y == 1)
+            // Řádek s transportními tlačítky - viz přesné rozvržení v RenderDashboard:
+            // " [<<] [►] [▄] [>>] ♪♫"
+            if (y == TransportButtonsRow)
             {
-                if (x >= 40 && x <= 43)      // [<<]
+                if (x >= 1 && x <= 4)        // [<<]
                 {
                     _audioPlayer.Seek(-5.0);
                 }
-                else if (x >= 45 && x <= 47) // [►]
+                else if (x >= 6 && x <= 8)   // [►]
                 {
                     if (_isPaused) TogglePlayPause();
                 }
-                else if (x >= 49 && x <= 51) // [▄]
+                else if (x >= 10 && x <= 12) // [▄]
                 {
                     if (!_isPaused) TogglePlayPause();
                 }
-                else if (x >= 53 && x <= 56) // [>>]
+                else if (x >= 14 && x <= 17) // [>>]
                 {
                     _audioPlayer.Seek(5.0);
                 }
@@ -546,6 +686,42 @@ namespace PS150.UI.Windows
             return true;
         }
 
+        /// <summary>
+        /// Rozlomí (typicky dlouhou) cestu k souboru na řádky nepřesahující
+        /// ConsoleWidth. Kde to jde, láme se hned za zpětným lomítkem (ať
+        /// nevznikají poloviny názvů adresářů uprostřed řádku) - jen když by
+        /// takhle vzniklo příliš krátké torzo, láme se natvrdo po znacích.
+        /// </summary>
+        private static List<string> WrapPath(string text, int width)
+        {
+            var lines = new List<string>();
+            int pos = 0;
+            while (pos < text.Length)
+            {
+                int remaining = text.Length - pos;
+                if (remaining <= width)
+                {
+                    lines.Add(text.Substring(pos));
+                    break;
+                }
+
+                int breakAt = text.LastIndexOf('\\', pos + width - 1, width);
+                if (breakAt <= pos) // žádné vhodné lomítko poblíž -> tvrdý zlom
+                {
+                    breakAt = pos + width - 1;
+                }
+                else
+                {
+                    breakAt++; // lomítko zůstane na konci předchozího řádku
+                }
+
+                lines.Add(text.Substring(pos, breakAt - pos));
+                pos = breakAt;
+            }
+            if (lines.Count == 0) lines.Add("");
+            return lines;
+        }
+
         private static void RenderDashboard()
         {
             Console.SetCursorPosition(0, 0);
@@ -553,26 +729,52 @@ namespace PS150.UI.Windows
             string currentFile = _navigator.CurrentFile ?? "No file loaded";
             string fileName = Path.GetFileName(currentFile);
             string folderPath = Path.GetDirectoryName(currentFile) ?? "";
+            string fullPath = $"{folderPath}\\{fileName}";
             string modeLabel = _isMidiMode ? "MIDI PASS-THROUGH" : "AUDIO STREAM (WASAPI)";
 
-            // Čas se čte z toho přehrávače, který právě opravdu hraje - u
-            // audio souborů z _audioPlayer (odhad z WASAPI streamu), u MIDI
-            // z _midiPlayer (přesný výpočet z dat souboru, viz komentář u
-            // GmPianoMidiPlayer.TotalTime).
             TimeSpan current = _isMidiMode ? _midiPlayer.CurrentTime : _audioPlayer.CurrentTime;
             TimeSpan total = _isMidiMode ? _midiPlayer.TotalTime : _audioPlayer.TotalTime;
-            string timeStr = $"{current:mm\\:ss} / {total:mm\\:ss}";
+            string timeStr = $"{current:mm\\:ss}/{total:mm\\:ss}";
 
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("=========================================================================================");
+            string separator = new string('=', ContentWidth);
+            string thinSeparator = new string('-', ContentWidth);
 
-            Console.Write($" PS150 | Vol: {_volume,3}% | [{timeStr}] ");
+            // --- Řádek 0: textový title bar ---
+            // Vlevo "♪♫ PS150 Player.", vpravo [_][□][X] zarovnané na pravý
+            // okraj, mezi tím pozadí táhnoucí se přes celý řádek.
+            const string titleText = "♪♫ PS150 Player.";
+            const string ctrlBlock = "[_][□][X]";
+            int padLen = Math.Max(0, ContentWidth - titleText.Length - ctrlBlock.Length);
 
+            Console.BackgroundColor = ConsoleColor.DarkCyan;
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.Write(titleText);
+            Console.Write(new string(' ', padLen));
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.Write("[<<] ");
+            Console.Write("[_]");
+            Console.ForegroundColor = ConsoleColor.DarkGray; // maximalizace je záměrně vyřazená, viz HandleTitleBarClick
+            Console.Write("[□]");
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.Write("[");
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Write("X");
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.Write("]");
+            Console.ResetColor();
+            Console.WriteLine();
 
-            // Stejný princip jako u času výše - "hraje teď" se ptáme toho
-            // přehrávače, který je zrovna aktivní, ne vždycky _audioPlayer.
+            // --- Řádek 1: oddělovač ---
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine(separator);
+
+            // --- Řádek 2: hlasitost + čas ---
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine($" Vol:{_volume,3}% [{timeStr}]".PadRight(ContentWidth));
+
+            // --- Řádek 3: transportní tlačítka (souřadnice viz HandleMouseClick) ---
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write(" [<<] ");
+
             bool isActuallyPlaying = _isMidiMode
                 ? !_midiPlayer.IsPaused
                 : _audioPlayer.IsPlaying;
@@ -607,99 +809,116 @@ namespace PS150.UI.Windows
 
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.Write("[>>] ");
-
             Console.ForegroundColor = ConsoleColor.Magenta;
             Console.Write("♪♫");
-
-            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.ResetColor();
             Console.WriteLine();
 
-            Console.WriteLine($" Mode: {modeLabel,-22}");
-            Console.WriteLine("=========================================================================================");
+            // --- Řádek 4: režim ---
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine($" {modeLabel}".PadRight(ContentWidth));
+
+            // --- Řádek 5: oddělovač ---
+            Console.WriteLine(separator);
             Console.ResetColor();
 
-            Console.WriteLine($"  {folderPath}\\{fileName} ");
-            Console.WriteLine("-----------------------------------------------------------------------------------------");
+            // --- Cesta k souboru, zalomená na šířku okna ---
+            var pathLines = WrapPath(fullPath, ContentWidth - 1);
+            foreach (string line in pathLines)
+            {
+                Console.WriteLine($" {line}".PadRight(ContentWidth));
+            }
+
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine(thinSeparator);
+            Console.ResetColor();
+
+            // Řádky: title(1) + sep(1) + vol(1) + transport(1) + mode(1) + sep(1)
+            //       + cesta (pathLines.Count) + tenký oddělovač(1)
+            _contentStartRow = 6 + pathLines.Count + 1;
+        }
+
+        /// <summary>
+        /// Zarovná text na přesně danou šířku - kratší text doplní mezerami,
+        /// delší ořízne a označí "…". Používá se všude v úzkém 30znakovém
+        /// layoutu, ať se žádný řádek nikdy neroztáhne mimo okno.
+        /// </summary>
+        private static string FitWidth(string text, int width)
+        {
+            if (width <= 0) return "";
+            if (text.Length <= width) return text.PadRight(width);
+            return width == 1 ? text.Substring(0, 1) : text.Substring(0, width - 1) + "…";
         }
 
         private static void RenderMetersOnly()
         {
-            Console.SetCursorPosition(0, 7);
+            Console.SetCursorPosition(0, _contentStartRow);
 
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine("-120dB             -90db                 -60db                -30dB                 0dB");
-            Console.ResetColor();
+            const int barWidth = 14;
+            string barL = AudioMeter.RenderBar(_leftDb, barWidth);
+            string barR = AudioMeter.RenderBar(_rightDb, barWidth);
 
-            string barL = AudioMeter.RenderBar(_leftDb, 80);
-            string barR = AudioMeter.RenderBar(_rightDb, 80);
-
-            Console.Write(" L: [");
+            Console.Write(" L:[");
             Console.ForegroundColor = ConsoleColor.Green;
             Console.Write(barL);
             Console.ResetColor();
-            Console.WriteLine($"] {_leftDb,6:F1} dB");
+            Console.WriteLine(FitWidth($"]{_leftDb,5:F1}dB", ContentWidth - 4 - barWidth));
 
-            Console.Write(" R: [");
+            Console.Write(" R:[");
             Console.ForegroundColor = ConsoleColor.Green;
             Console.Write(barR);
             Console.ResetColor();
-            Console.WriteLine($"] {_rightDb,6:F1} dB");
+            Console.WriteLine(FitWidth($"]{_rightDb,5:F1}dB", ContentWidth - 4 - barWidth));
 
             // --- Tři pásma syntezátoru (hloubky/středy/výšky) ---
-            // Stejná legenda i formát pruhu jako u L/R výše (viz řádek "-120dB...0dB").
-            // Jiná barva (azurová) jen kvůli přehlednosti, ať se dá od L/R na první
-            // pohled odlišit - jinak identický vzhled/rozsah/škálování.
-            string barBass = AudioMeter.RenderBar(_bassDb, 80);
-            string barMid = AudioMeter.RenderBar(_midDb, 80);
-            string barTreble = AudioMeter.RenderBar(_trebleDb, 80);
+            // Stejný formát pruhu jako u L/R výše, jen jiná barva (azurová),
+            // ať se to na první pohled odliší - jinak identický rozsah/škálování.
+            string barBass = AudioMeter.RenderBar(_bassDb, barWidth);
+            string barMid = AudioMeter.RenderBar(_midDb, barWidth);
+            string barTreble = AudioMeter.RenderBar(_trebleDb, barWidth);
 
-            Console.Write(" H: [");
+            Console.Write(" H:[");
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.Write(barBass);
             Console.ResetColor();
-            Console.WriteLine($"] {_bassDb,6:F1} dB");
+            Console.WriteLine(FitWidth($"]{_bassDb,5:F1}dB", ContentWidth - 4 - barWidth));
 
-            Console.Write(" S: [");
+            Console.Write(" S:[");
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.Write(barMid);
             Console.ResetColor();
-            Console.WriteLine($"] {_midDb,6:F1} dB");
+            Console.WriteLine(FitWidth($"]{_midDb,5:F1}dB", ContentWidth - 4 - barWidth));
 
-            Console.Write(" V: [");
+            Console.Write(" V:[");
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.Write(barTreble);
             Console.ResetColor();
-            Console.WriteLine($"] {_trebleDb,6:F1} dB");
+            Console.WriteLine(FitWidth($"]{_trebleDb,5:F1}dB", ContentWidth - 4 - barWidth));
 
             // --- Zadávání čísla rejstříku + přehled aktivních rejstříků ---
-            Console.Write(" Rejstřík č.: [");
+            Console.Write(" Reg:[");
             Console.ForegroundColor = ConsoleColor.Red;
             Console.Write(_registerInputBuffer.ToString().PadRight(3));
             Console.ResetColor();
-            Console.WriteLine("]  (piš číslo, Enter = ON/OFF, Backspace = smaž, Esc = zruš)   ");
+            Console.WriteLine(FitWidth("] Ent/Esc/Bksp", ContentWidth - 6 - 3));
 
-            Console.Write(" Aktivní rejstříky: ");
+            Console.Write(" Akt: ");
             var active = App.OrganEngine?.ActiveRegisters;
             if (active != null && active.Count > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.Write(string.Join(", ", active));
+                Console.WriteLine(FitWidth(string.Join(",", active), ContentWidth - 6));
                 Console.ResetColor();
-                Console.WriteLine("                                                        ");
             }
             else
             {
-                Console.WriteLine("(žádný)                                                        ");
+                Console.WriteLine(FitWidth("(žádný)", ContentWidth - 6));
             }
         }
 
         private static void RenderMidiStaffOnly()
         {
-            Console.SetCursorPosition(0, 7);
-
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine("-----------------------------------------------------------------------------------------");
-            Console.ResetColor();
+            Console.SetCursorPosition(0, _contentStartRow);
 
             // Jednoduchý náhled osnov - jeden řádek pro každou notovou osnovu
             // (kanál), kterou soubor používá, řádky pod sebou. Osnovy se
@@ -723,13 +942,16 @@ namespace PS150.UI.Windows
                 // dá diagnostikovat, i kdyby v adresáři bylo víc vadných
                 // souborů za sebou.
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine(" CHYBA při přehrávání tohoto souboru - zůstávám stát, další soubor se nespustí:");
-                Console.WriteLine($" {errorMessage}".PadRight(90));
+                Console.WriteLine(FitWidth(" CHYBA přehrávání:", ContentWidth));
+                foreach (string line in WrapPath(errorMessage, ContentWidth - 1))
+                {
+                    Console.WriteLine(FitWidth($" {line}", ContentWidth));
+                }
                 Console.ResetColor();
 
                 for (int i = 0; i < 8; i++)
                 {
-                    Console.WriteLine(new string(' ', 90));
+                    Console.WriteLine(new string(' ', ContentWidth));
                 }
                 return;
             }
@@ -738,25 +960,28 @@ namespace PS150.UI.Windows
                 .GroupBy(n => n.Channel)
                 .ToDictionary(g => g.Key, g => g.Select(n => n.Note).OrderBy(n => n).ToArray());
 
+            // Kompaktní popisek kanálu - "C01".."C16", bicí kanál (10) jako "D10" -
+            // na 30 znaků širokém řádku není místo na dřívější "Ch01"/"Ch10[DRUM]".
             int staffLines = 0;
             foreach (int channel in usedChannels)
             {
-                string channelLabel = channel == 9 ? "Ch10[DRUM]" : $"Ch{channel + 1:D2}";
+                string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
                 string notes = notesByChannel.TryGetValue(channel, out var noteNumbers)
                     ? string.Join(" ", noteNumbers.Select(NoteNumberToName))
                     : "";
 
+                string label = $" {channelLabel}:";
                 Console.ForegroundColor = ConsoleColor.White;
-                Console.Write($" {channelLabel,-10}: ");
+                Console.Write(label);
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine(notes.PadRight(80));
+                Console.WriteLine(FitWidth(notes, ContentWidth - label.Length));
                 Console.ResetColor();
                 staffLines++;
             }
 
             if (staffLines == 0)
             {
-                Console.WriteLine(" (osnovy souboru zatím nejsou rozpoznané)                                              ");
+                Console.WriteLine(FitWidth(" (osnovy zatím nerozpoznané)", ContentWidth));
                 staffLines = 1;
             }
 
@@ -767,16 +992,16 @@ namespace PS150.UI.Windows
             if (!string.IsNullOrEmpty(seekDiagnostic))
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($" [Převíjení] {seekDiagnostic}".PadRight(90));
+                Console.WriteLine(FitWidth($" [Seek] {seekDiagnostic}", ContentWidth));
                 Console.ResetColor();
                 staffLines++;
             }
 
             // Smažeme případný zbytek předchozích (delších) osnov, ať staré řádky
             // nezůstanou "viset" pod aktuálním výpisem po zmenšení počtu kanálů.
-            for (int i = staffLines; i < 10; i++)
+            for (int i = staffLines; i < 17; i++)
             {
-                Console.WriteLine(new string(' ', 90));
+                Console.WriteLine(new string(' ', ContentWidth));
             }
         }
 
