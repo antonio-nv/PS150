@@ -45,6 +45,15 @@ namespace PS150.UI.Windows
                 // VgaEngine (má tam vlastní instanci GmPianoMidiPlayer a napojený
                 // náhled aktivních not).
                 VgaEngine.Run(filePath);
+
+                // DŮLEŽITÉ: tahle větev dřív po návratu z VgaEngine.Run() (tedy
+                // po zavření VGA konzole - Escape nebo kliknutí na [X]) vůbec
+                // nezavolala Shutdown(), na rozdíl od větve pro audio soubory
+                // níž. Pokud aplikace nastartovala rovnou na .mid souboru
+                // (typicky settings.LastFilePath z minulého spuštění), WPF
+                // Application zůstala běžet na pozadí i po zavření konzole -
+                // proces bylo nutné dorazit přes Alt+F4.
+                Application.Current.Shutdown();
             }
             else
             {

@@ -34,6 +34,20 @@ namespace PS150.UI.Windows
         // to bylo natvrdo na řádku 7.
         private static int _contentStartRow = 7;
 
+        // Vlastní (spolehlivější) tažení okna myší - viz StartWindowDrag /
+        // UpdateWindowDrag níž. Nespoléhá se na WM_NCLBUTTONDOWN modální
+        // smyčku, protože ta čeká na SKUTEČNÉ puštění tlačítka myši a kvůli
+        // zpoždění fronty konzole se snadno stane, že tlačítko je puštěné
+        // už dřív, než se k tomu Windows vůbec dostane - a smyčka se pak
+        // zasekne navěky (řešilo se to i klávesou Alt+F4).
+        private static bool _isDragging = false;
+        private static int _dragOffsetX = 0;
+        private static int _dragOffsetY = 0;
+
+        // Poslední okamžik, kdy se RenderDashboard() zavolal "jen tak", kvůli
+        // plynoucímu aktuálnímu času - viz smyčka v Run().
+        private static DateTime _lastTimeRefresh = DateTime.MinValue;
+
         private static DirectoryNavigator _navigator = new();
         private static AudioPlayer _audioPlayer = new();
 
@@ -103,7 +117,39 @@ namespace PS150.UI.Windows
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
         [DllImport("user32.dll")]
-        private static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        private const int SM_XVIRTUALSCREEN = 76;
+        private const int SM_YVIRTUALSCREEN = 77;
+        private const int SM_CXVIRTUALSCREEN = 78;
+        private const int SM_CYVIRTUALSCREEN = 79;
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        private const int VK_LBUTTON = 0x01;
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -115,9 +161,8 @@ namespace PS150.UI.Windows
         private const int WS_CAPTION = 0x00C00000;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOZORDER = 0x0004;
         private const uint SWP_FRAMECHANGED = 0x0020;
-        private const int WM_NCLBUTTONDOWN = 0x00A1;
-        private const int HT_CAPTION = 0x2;
 
         private const int STD_INPUT_HANDLE = -10;
         private const uint ENABLE_PROCESSED_INPUT = 0x0001;
@@ -158,7 +203,13 @@ namespace PS150.UI.Windows
         [StructLayout(LayoutKind.Sequential)]
         private struct KEY_EVENT_RECORD
         {
-            public bool bKeyDown;
+            // Nativně je to Win32 BOOL (4 bajty) - schválně čteno jako int,
+            // ne jako C# bool. "bool" v P/Invoke struktuře je notoricky
+            // křehké místo (marshaling se snadno netrefí přesně na hranici
+            // bajtů) a hodnota pak vychází vždycky false, takže by se
+            // klávesové události tiše zahazovaly úplně všechny - přesně to,
+            // co jsme viděli (myš fungovala, klávesnice ne).
+            public int bKeyDown;
             public ushort wRepeatCount;
             public ushort wVirtualKeyCode;
             public ushort wVirtualScanCode;
@@ -238,6 +289,37 @@ namespace PS150.UI.Windows
                 int style = GetWindowLong(hwnd, GWL_STYLE);
                 SetWindowLong(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME));
                 SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+
+                // Obnovení uložené polohy okna (viz konec smyčky níž, kde se
+                // ukládá) - jen když souřadnice pořád dávají smysl vzhledem
+                // k AKTUÁLNĚ připojeným monitorům. Bez týhle kontroly by se
+                // po odpojení monitoru nebo změně sestavy okno mohlo otevřít
+                // mimo viditelnou plochu a nešlo by na něj myší vůbec
+                // dosáhnout.
+                if (_settings.WindowX.HasValue && _settings.WindowY.HasValue)
+                {
+                    int vLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                    int vTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                    int vWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                    int vHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+                    // Nestačí jen "levý horní roh je někde na virtuální ploše" -
+                    // necháváme aspoň kousek title baru (50 px) viditelný, ať
+                    // je za co okno příště chytit a přetáhnout, i kdyby zbytek
+                    // vyčníval mimo.
+                    const int minVisible = 50;
+                    bool withinBounds =
+                        _settings.WindowX.Value >= vLeft - minVisible &&
+                        _settings.WindowX.Value <= vLeft + vWidth - minVisible &&
+                        _settings.WindowY.Value >= vTop &&
+                        _settings.WindowY.Value <= vTop + vHeight - minVisible;
+
+                    if (withinBounds)
+                    {
+                        SetWindowPos(hwnd, IntPtr.Zero, _settings.WindowX.Value, _settings.WindowY.Value, 0, 0,
+                            SWP_NOSIZE | SWP_NOZORDER);
+                    }
+                }
             }
 
             Console.OutputEncoding = Encoding.UTF8;
@@ -307,7 +389,7 @@ namespace PS150.UI.Windows
                     {
                         var record = buffer[i];
 
-                        if (record.EventType == KEY_EVENT && record.KeyEvent.bKeyDown)
+                        if (record.EventType == KEY_EVENT && record.KeyEvent.bKeyDown != 0)
                         {
                             running = HandleInput((ConsoleKey)record.KeyEvent.wVirtualKeyCode);
                             RenderDashboard();
@@ -338,9 +420,8 @@ namespace PS150.UI.Windows
                                 else if (hwnd != IntPtr.Zero)
                                 {
                                     // Kdekoliv jinde na formuláři (cesta, metry, prázdné
-                                    // plochy...) -> tažení okna myší, stejný trik jako
-                                    // na title baru výše.
-                                    SendMessage(hwnd, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+                                    // plochy...) -> tažení okna myší, viz StartWindowDrag.
+                                    StartWindowDrag(hwnd);
                                 }
                                 RenderDashboard();
                             }
@@ -349,6 +430,22 @@ namespace PS150.UI.Windows
                 }
 
                 if (!running) break;
+
+                // Tažení okna (viz StartWindowDrag/UpdateWindowDrag) se
+                // aktualizuje KAŽDÝ tik, ne jen když přijde nová událost z
+                // konzole - tak sleduje aktuální polohu myši plynule.
+                UpdateWindowDrag(hwnd);
+
+                // RenderDashboard() se jinak volá jen při klávese/kliknutí -
+                // takže se aktuální čas (na rozdíl od celkového, který se
+                // spočítá jednou při načtení souboru) sám od sebe nikdy
+                // neposouval. Jednou za sekundu ho i bez žádné akce uživatele
+                // překreslíme, ať čas viditelně běží dál.
+                if ((DateTime.UtcNow - _lastTimeRefresh).TotalSeconds >= 1)
+                {
+                    RenderDashboard();
+                    _lastTimeRefresh = DateTime.UtcNow;
+                }
                 if (!_isMidiMode && !_isPaused && _audioPlayer.TotalTime > TimeSpan.Zero)
                 {
                     if (_audioPlayer.CurrentTime >= _audioPlayer.TotalTime - TimeSpan.FromMilliseconds(300))
@@ -422,6 +519,14 @@ namespace PS150.UI.Windows
                 Thread.Sleep(30);
             }
 
+            // Uložit polohu okna pro příští spuštění (viz obnovení výše).
+            if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, out RECT finalRect))
+            {
+                _settings.WindowX = finalRect.Left;
+                _settings.WindowY = finalRect.Top;
+                _settings.Save();
+            }
+
             _audioPlayer.Dispose();
             _midiPlayer.Stop();
             Console.CursorVisible = true;
@@ -457,10 +562,58 @@ namespace PS150.UI.Windows
             }
             else if (hwnd != IntPtr.Zero)
             {
-                // Kdekoliv jinde na title baru -> tažení okna myší.
-                SendMessage(hwnd, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+                // Kdekoliv jinde na title baru -> tažení okna myší, viz StartWindowDrag.
+                StartWindowDrag(hwnd);
             }
             return true;
+        }
+
+        /// <summary>
+        /// Zapamatuje si posun mezi kurzorem a levým horním rohem okna a
+        /// zapne sledování tažení - viz UpdateWindowDrag, volané z hlavní
+        /// smyčky v Run() úplně nezávisle na frontě konzolových událostí.
+        /// </summary>
+        private static void StartWindowDrag(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            if (!GetCursorPos(out POINT cursor)) return;
+            if (!GetWindowRect(hwnd, out RECT rect)) return;
+
+            _dragOffsetX = cursor.X - rect.Left;
+            _dragOffsetY = cursor.Y - rect.Top;
+            _isDragging = true;
+        }
+
+        /// <summary>
+        /// Volá se z hlavní smyčky KAŽDÝ tik (ne jen když přijde událost
+        /// myši z konzole - proto to nemá jejich zpoždění, viz komentář u
+        /// _isDragging). Ptá se přímo na AKTUÁLNÍ stav levého tlačítka
+        /// (GetAsyncKeyState), ne na to, co je zrovna ve frontě - takže se
+        /// nemůže stát, že by čekala na "puštění", které se ve skutečnosti
+        /// už dávno stalo (přesně to zamykalo starý SendMessage/WM_NCLBUTTONDOWN
+        /// přístup).
+        /// </summary>
+        private static void UpdateWindowDrag(IntPtr hwnd)
+        {
+            if (!_isDragging) return;
+
+            bool leftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (!leftButtonDown)
+            {
+                _isDragging = false;
+                // Opakované SetWindowPos během tažení (okno patří jinému
+                // procesu - conhost/Windows Terminal, ne nám) občas okno
+                // připraví o klávesový fokus, i když vypadá pořád aktivní.
+                // Po skončení tažení si ho radši vyžádáme zpátky výslovně.
+                if (hwnd != IntPtr.Zero) SetForegroundWindow(hwnd);
+                return;
+            }
+
+            if (hwnd != IntPtr.Zero && GetCursorPos(out POINT cursor))
+            {
+                SetWindowPos(hwnd, IntPtr.Zero, cursor.X - _dragOffsetX, cursor.Y - _dragOffsetY, 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER);
+            }
         }
 
         private static void HandleMouseClick(short x, short y)

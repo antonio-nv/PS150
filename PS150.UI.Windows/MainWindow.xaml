@@ -5,7 +5,8 @@
         Title="PS150" Height="450" Width="800"
         Background="Black"
         KeyDown="MainWindow_KeyDown"
-        MouseWheel="MainWindow_MouseWheel">
+        MouseWheel="MainWindow_MouseWheel"
+        MouseMove="MainWindow_MouseMove">
     <Grid>
         <!-- Nahrazeno z MediaElement na VLC VideoView -->
         <vlc:VideoView x:Name="VideoViewer" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>

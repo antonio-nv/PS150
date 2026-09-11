@@ -11,6 +11,15 @@ namespace PS150.UI.Windows
         public string? LastFilePath { get; set; }
         public long LastPositionMs { get; set; } = 0;
 
+        // Poloha okna (levý horní roh, v souřadnicích celé virtuální
+        // obrazovky - tj. napříč všemi monitory). Nullable, protože při
+        // úplně prvním spuštění ještě nic uloženo není - viz VgaEngine.Run(),
+        // kde se před obnovením ověřuje, že souřadnice pořád leží v rozsahu
+        // aktuálně připojených monitorů (jinak by se okno mohlo otevřít
+        // "mimo obrazovku", kdyby se od minula změnilo zapojení monitorů).
+        public int? WindowX { get; set; }
+        public int? WindowY { get; set; }
+
         private static string SettingsFilePath =>
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json");
 
