@@ -12,6 +12,14 @@ namespace PS150.UI.Windows
     {
         private DirectoryNavigator _navigator = new();
 
+        // Nastaveno, pokud navigace (PageUp/PageDown) "přejede" na soubor,
+        // který už není video - MainWindow se sama zavře a MediaLauncher
+        // podle tohohle pozná, že má pokračovat spuštěním VgaEngine na
+        // tomhle souboru. Null = uživatel jen normálně zavřel okno.
+        public string? HandoffFile { get; private set; }
+
+        private readonly AppSettings _settings = AppSettings.Load();
+
         // VLC objekty
         private LibVLC? _libVLC;
         private MediaPlayer? _mediaPlayer;
@@ -40,7 +48,7 @@ namespace PS150.UI.Windows
             // krok navíc, tak zůstává rovnou jen u tohohle.
             this.WindowStyle = WindowStyle.None;
             this.WindowState = WindowState.Maximized;
-            this.Topmost = true;
+            //this.Topmost = true;
 
             _overlay.Show();
             _overlay.SeekRequested += fraction =>
@@ -104,6 +112,13 @@ namespace PS150.UI.Windows
                 _mediaPlayer.Play(media);
 
                 _overlay.ShowFileInfo(currentFile);
+
+                // Stejná oprava jako ve VgaEngine - ať settings.json sleduje
+                // skutečnou navigaci (PageUp/PageDown), ne jen soubor, se
+                // kterým appka nastartovala.
+                _settings.LastFilePath = currentFile;
+                _settings.LastFolderPath = Path.GetDirectoryName(currentFile);
+                _settings.Save();
             }
             catch (Exception ex)
             {
@@ -188,7 +203,16 @@ namespace PS150.UI.Windows
                 case Key.PageDown:
                     try
                     {
-                        _navigator.GetNextFile();
+                        string? next = _navigator.GetNextFile();
+                        if (next != null && !PS150.Core.MediaKind.IsVideo(next))
+                        {
+                            // Navigace přejela na zvuk/MIDI - tohle okno
+                            // (video) tady končí, MediaLauncher pokračuje
+                            // spuštěním VGA konzole na tomhle souboru.
+                            HandoffFile = next;
+                            Close();
+                            break;
+                        }
                         StartPlayingCurrentFile();
                     }
                     catch (Exception ex)
@@ -201,7 +225,13 @@ namespace PS150.UI.Windows
                 case Key.PageUp:
                     try
                     {
-                        _navigator.GetPreviousFile();
+                        string? prev = _navigator.GetPreviousFile();
+                        if (prev != null && !PS150.Core.MediaKind.IsVideo(prev))
+                        {
+                            HandoffFile = prev;
+                            Close();
+                            break;
+                        }
                         StartPlayingCurrentFile();
                     }
                     catch (Exception ex)

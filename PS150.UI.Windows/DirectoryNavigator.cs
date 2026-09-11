@@ -127,4 +127,24 @@ namespace PS150.Core
                 || ext == ".mov" || ext == ".flv" || ext == ".webm" || ext == ".m4v"; // <--- Doplněny chybějící video formáty
         }
     }
+
+    /// <summary>
+    /// Sdílené rozlišení "je tenhle soubor video, nebo zvuk (audio/MIDI)?" -
+    /// DirectoryNavigator výše záměrně míchá oba typy do jednoho seznamu
+    /// (jedna společná složka = jeden playlist), takže při procházení přes
+    /// PageUp/PageDown nebo automatickém doehrání skladby může navigace
+    /// kdykoliv "přejet" z jednoho typu na druhý. VgaEngine a MainWindow
+    /// tímhle poznají, kdy musí samy sebe ukončit a předat soubor druhé
+    /// straně - viz App.xaml.cs/MediaLauncher, které tohle střídání řídí.
+    /// </summary>
+    public static class MediaKind
+    {
+        private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v"
+        };
+
+        public static bool IsVideo(string filePath) =>
+            VideoExtensions.Contains(Path.GetExtension(filePath));
+    }
 }

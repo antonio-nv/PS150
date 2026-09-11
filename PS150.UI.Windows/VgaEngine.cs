@@ -99,6 +99,10 @@ namespace PS150.UI.Windows
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AllocConsole();
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FreeConsole();
+
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetConsoleWindow();
 
@@ -234,8 +238,22 @@ namespace PS150.UI.Windows
         }
         #endregion
 
-        public static void Run(string filePath)
+        // Nastaveno při navigaci (PageUp/PageDown i automatickém doehrání
+        // skladby), pokud další soubor v pořadí vyjde jako VIDEO - VgaEngine
+        // sama sebe ukončí (running=false) a tohle je cesta, kterou má
+        // MediaLauncher předat MainWindow. Zůstává null, pokud uživatel
+        // jen normálně skončil (Escape/[X]) bez navazujícího souboru.
+        private static string? _handoffFile = null;
+
+        /// <returns>
+        /// Cestu k souboru, na který navigace "přejela" mimo doménu VGA
+        /// (tzn. video), a kam by měl MediaLauncher pokračovat spuštěním
+        /// MainWindow. Null, pokud uživatel jen normálně skončil.
+        /// </returns>
+        public static string? Run(string filePath)
         {
+            _handoffFile = null;
+
             // Načtení uloženého nastavení (hlasitost atd.) - jen jednou, při
             // prvním spuštění konzole. Dřív se _volume vždycky natvrdo
             // inicializovalo na 80 bez ohledu na settings.json.
@@ -450,7 +468,13 @@ namespace PS150.UI.Windows
                 {
                     if (_audioPlayer.CurrentTime >= _audioPlayer.TotalTime - TimeSpan.FromMilliseconds(300))
                     {
-                        _navigator.GetNextFile();
+                        string? nextFile = _navigator.GetNextFile();
+                        if (nextFile != null && MediaKind.IsVideo(nextFile))
+                        {
+                            _handoffFile = nextFile;
+                            running = false;
+                            break;
+                        }
                         UpdateFileTypeState();
                         Console.Clear();
                         RenderDashboard();
@@ -470,7 +494,13 @@ namespace PS150.UI.Windows
 
                     if (finishedNaturally)
                     {
-                        _navigator.GetNextFile();
+                        string? nextFile = _navigator.GetNextFile();
+                        if (nextFile != null && MediaKind.IsVideo(nextFile))
+                        {
+                            _handoffFile = nextFile;
+                            running = false;
+                            break;
+                        }
                         UpdateFileTypeState();
                         Console.Clear();
                         RenderDashboard();
@@ -519,17 +549,37 @@ namespace PS150.UI.Windows
                 Thread.Sleep(30);
             }
 
-            // Uložit polohu okna pro příští spuštění (viz obnovení výše).
+            // Uložit polohu okna a naposledy přehrávaný soubor pro příští
+            // spuštění (viz obnovení výše). DŘÍV se do settings.json ukládal
+            // jen soubor, se kterým appka nastartovala - LastFilePath se pak
+            // nikdy neaktualizoval podle skutečné navigace (PageUp/PageDown),
+            // takže po zavření zůstal uložený ten úplně první soubor, ne ten
+            // poslední přehrávaný.
             if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, out RECT finalRect))
             {
                 _settings.WindowX = finalRect.Left;
                 _settings.WindowY = finalRect.Top;
-                _settings.Save();
             }
+            string? lastFile = _handoffFile ?? _navigator.CurrentFile;
+            if (!string.IsNullOrEmpty(lastFile))
+            {
+                _settings.LastFilePath = lastFile;
+                _settings.LastFolderPath = Path.GetDirectoryName(lastFile);
+            }
+            _settings.Save();
 
-            _audioPlayer.Dispose();
+            _audioPlayer.Stop();
             _midiPlayer.Stop();
             Console.CursorVisible = true;
+
+            // DŮLEŽITÉ: Run() se teď může za běh procesu zavolat vícekrát
+            // (viz smyčka v MediaLauncher.Launch, co střídá video a
+            // zvuk/MIDI) - bez tohohle by druhé volání AllocConsole() na
+            // začátku Run() tiše selhalo (proces už jednou konzoli má) a
+            // pracovalo by se dál se starou, možná už neplatnou konzolí.
+            FreeConsole();
+
+            return _handoffFile;
         }
 
         // Řádek s transportními tlačítky - musí sedět s RenderDashboard.
@@ -796,6 +846,11 @@ namespace PS150.UI.Windows
                         string? nextFile = _navigator.GetNextFile();
                         if (nextFile != null)
                         {
+                            if (MediaKind.IsVideo(nextFile))
+                            {
+                                _handoffFile = nextFile;
+                                return false;
+                            }
                             UpdateFileTypeState();
                             Console.Clear();
                         }
@@ -809,6 +864,11 @@ namespace PS150.UI.Windows
                         string? prevFile = _navigator.GetPreviousFile();
                         if (prevFile != null)
                         {
+                            if (MediaKind.IsVideo(prevFile))
+                            {
+                                _handoffFile = prevFile;
+                                return false;
+                            }
                             UpdateFileTypeState();
                             Console.Clear();
                         }

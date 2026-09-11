@@ -13,56 +13,52 @@ namespace PS150.UI.Windows
 {
     public static class MediaLauncher
     {
-        // Seznam přípon, které považujeme za video
-        private static readonly string[] VideoExtensions = new[]
-        {
-            ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v"
-        };
-
         public static void Launch(string filePath, InputManager inputManager)
         {
-            string ext = Path.GetExtension(filePath).ToLowerInvariant();
+            // Smyčka střídající oba režimy podle toho, na jaký typ souboru
+            // navigace (PageUp/PageDown, doehrání skladby) uvnitř VgaEngine
+            // nebo MainWindow "přejede" - viz VgaEngine.Run() (vrací cestu
+            // k videu, nebo null) a MainWindow.HandoffFile (totéž obráceně).
+            // Dřív byly oba režimy úplně oddělené: přechod z videa na zvuk
+            // (nebo naopak) se navenek buď vůbec nestal (audio prostě
+            // začalo hrát potichu uvnitř fullscreen video okna), nebo appka
+            // po ukončení jednoho režimu prostě skončila celá.
+            Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-            if (VideoExtensions.Contains(ext))
+            string? nextFile = filePath;
+
+            while (nextFile != null)
             {
-                // VIDEO -> Spustíme WPF okno s LibVLC
-                Application.Current.ShutdownMode = ShutdownMode.OnMainWindowClose;
+                if (PS150.Core.MediaKind.IsVideo(nextFile))
+                {
+                    var window = new MainWindow();
+                    Application.Current.MainWindow = window;
 
-                var window = new MainWindow();
-                Application.Current.MainWindow = window;
-                window.Show();
-                window.PlayFile(filePath);
-            }
-            else if (ext == ".mid" || ext == ".midi")
-            {
-                // MIDI SOUBOR -> přehráváme na PC natvrdo jako klavír přes vestavěný
-                // Microsoft GS Wavetable Synth (viz GmPianoMidiPlayer). Toto NEjde
-                // přes PS150.Core / ToneEngine - ten zůstává nedotčený
-                // a slouží dál jen pro živé hraní z MIDI-IN klávesnice (inputManager
-                // výše, StartLiveDevice), s výhledem na budoucí HW nástroj.
-                //
-                // Spuštění a řízení přehrávání .mid souboru má na starosti přímo
-                // VgaEngine (má tam vlastní instanci GmPianoMidiPlayer a napojený
-                // náhled aktivních not).
-                VgaEngine.Run(filePath);
+                    // PlayFile() se volá až v Loaded - ne hned po vytvoření
+                    // okna - ať je VideoView (a tedy i nativní HWND, do
+                    // kterého VLC kreslí obraz) opravdu připravené, než se
+                    // pošle Play().
+                    string fileToPlay = nextFile;
+                    window.Loaded += (s, e) => window.PlayFile(fileToPlay);
 
-                // DŮLEŽITÉ: tahle větev dřív po návratu z VgaEngine.Run() (tedy
-                // po zavření VGA konzole - Escape nebo kliknutí na [X]) vůbec
-                // nezavolala Shutdown(), na rozdíl od větve pro audio soubory
-                // níž. Pokud aplikace nastartovala rovnou na .mid souboru
-                // (typicky settings.LastFilePath z minulého spuštění), WPF
-                // Application zůstala běžet na pozadí i po zavření konzole -
-                // proces bylo nutné dorazit přes Alt+F4.
-                Application.Current.Shutdown();
-            }
-            else
-            {
-                // AUDIO / OSTATNÍ -> Spustíme původní VGA konzoli
-                VgaEngine.Run(filePath);
+                    // ShowDialog() blokuje, dokud se okno nezavře - stejné
+                    // chování jako VgaEngine.Run() níž, takže se dá čekat
+                    // jednotně na "co bylo dál".
+                    window.ShowDialog();
 
-                // Po skončení konzole aplikaci ukončíme
-                Application.Current.Shutdown();
+                    nextFile = window.HandoffFile;
+                }
+                else
+                {
+                    // MIDI i ostatní zvukové soubory řeší VgaEngine společně
+                    // (viz GmPianoMidiPlayer pro .mid, AudioPlayer pro
+                    // ostatní) - PS150.Core/ToneEngine zůstává nedotčený,
+                    // slouží dál jen pro živé hraní z MIDI-IN klávesnice.
+                    nextFile = VgaEngine.Run(nextFile);
+                }
             }
+
+            Application.Current.Shutdown();
         }
     }
 
