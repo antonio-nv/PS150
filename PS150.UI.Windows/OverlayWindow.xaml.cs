@@ -16,6 +16,12 @@ namespace PS150.UI.Windows
     /// panely uvnitř téhož okna jako VideoView by prosvítaly jen tam, kde
     /// zrovna obraz není. Samostatné okno tenhle problém úplně obchází.
     ///
+    /// Nad videem zůstává díky vztahu Owner (nastavuje MainWindow při
+    /// vytvoření) - NE přes Topmost, to by drželo overlay navrchu úplně
+    /// nade vším na obrazovce a bránilo by to přepnout se na jiný program.
+    /// Owner zajišťuje jen "nad svým vlastníkem", nic víc - celá dvojice
+    /// (video+overlay) se dá zakrýt jiným oknem normálně.
+    ///
     /// Většinu času je "proklikávací" (WS_EX_TRANSPARENT) - myš i klik
     /// propadají až na MainWindow pod tímhle. Neprůhledné/klikatelné se
     /// stává jen ve chvíli, kdy je vidět šoupátko (SeekOverlay), ať na něj

@@ -45,30 +45,37 @@ namespace PS150.UI.Windows
 
             // Vždycky fullscreen, bez přepínání do okna - dřívější zvyk
             // "spustit v okně, pak přepnout na fullscreen" je dnes zbytečný
-            // krok navíc, tak zůstává rovnou jen u tohohle.
+            // krok navíc, tak zůstává rovnou jen u tohohle. ŽÁDNÉ
+            // Topmost=true - to by bránilo přepnout se na jiný program
+            // (Alt+Tab, kliknutí jinam); fullscreen je jen otázka velikosti
+            // a chybějícího rámu okna, ne vynuceného "vždy navrchu".
             this.WindowStyle = WindowStyle.None;
             this.WindowState = WindowState.Maximized;
-            //this.Topmost = true;
 
-            _overlay.Show();
+            // _overlay musí zůstat vizuálně NAD tímhle oknem (jinak by ho
+            // video HWND překrývalo - viz komentář v OverlayWindow.xaml.cs),
+            // ale ne nad úplně vším na obrazovce - proto vztah Owner/vlastník
+            // místo Topmost: Windows pak sám drží vlastněné okno nad
+            // vlastníkem, a celá dvojice (video+overlay) se dá společně
+            // zakrýt jiným oknem stejně jako kterékoliv normální okno.
+            // _overlay.Owner se NESMÍ nastavit tady v konstruktoru - v tuhle
+            // chvíli ještě tohle okno (MainWindow) nemá vytvořené vlastní
+            // nativní okno (HWND), to vznikne až při Show()/ShowDialog(),
+            // který volá až MediaLauncher zvenčí. WPF by jinak vyhodilo
+            // InvalidOperationException ("Owner, které nebylo nikdy dříve
+            // zobrazeno"). Počká se na SourceInitialized - to je nejdřívější
+            // okamžik, kdy HWND už bezpečně existuje.
+            this.SourceInitialized += (s, e) =>
+            {
+                _overlay.Owner = this;
+                _overlay.Show();
+            };
             _overlay.SeekRequested += fraction =>
             {
                 if (_mediaPlayer != null && _mediaPlayer.Length > 0)
                 {
                     _mediaPlayer.SeekTo(TimeSpan.FromMilliseconds(fraction * _mediaPlayer.Length));
                 }
-            };
-
-            // Dvě okna nastavená jako Topmost (MainWindow i _overlay) mají
-            // vzájemné pořadí dané tím, které bylo naposledy "nahoře" - a
-            // aktivace MainWindow (třeba po Alt+Tab zpátky) by ho v tomhle
-            // pořadí mohla vytáhnout před overlay. Při každé aktivaci proto
-            // overlay znovu protlačíme na vrch (přepnutím Topmost off/on je
-            // to standardní trik, jak WPF donutit poslat SetWindowPos znovu).
-            this.Activated += (s, e) =>
-            {
-                _overlay.Topmost = false;
-                _overlay.Topmost = true;
             };
 
             _seekOverlayUpdateTimer.Tick += (s, e) =>
