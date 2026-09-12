@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- linux-x64 kvůli Umax VisionBooku (Intel Celeron, běžné x86-64) -->
+    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PS150.Core\PS150.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- POZOR: na rozdíl od Windows tu NENÍ balíček s LibVLC samotným
+         (žádná obdoba VideoLAN.LibVLC.Windows pro Linux neexistuje) -
+         libvlc se musí nainstalovat přes apt, viz komentář v Program.cs. -->
+    <PackageReference Include="LibVLCSharp" Version="3.10.1" />
+  </ItemGroup>
+
+</Project>

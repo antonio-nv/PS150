@@ -1,5 +1,5 @@
 ﻿using System.Collections.Generic;
-using PS150.Core.Organ;
+using PS150.Core.Generators;
 
 namespace PS150.Raspi.Hardware
 {

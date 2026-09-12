@@ -1,6 +1,6 @@
 ﻿using System.Collections.Generic;
 
-namespace PS150.Core.Organ
+namespace PS150.Core.Generators
 {
     public enum ManualType { Pedal = 0, Manual1 = 1, Manual2 = 2, Manual3 = 3, Manual4 = 4 }
 
