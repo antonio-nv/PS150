@@ -5,4 +5,5 @@
   <Project Path="PS150.Raspi/PS150.Raspi.csproj" Id="bfd5761e-fdc8-468f-981b-d52c3399b71b" />
   <Project Path="PS150.UI.Linux/PS150.UI.Linux.csproj" />
   <Project Path="PS150.UI.Windows/PS150.UI.Windows.csproj" Id="07320e0e-56a4-49f9-acb9-574589e0ac5b" />
+  <Project Path="PS150.VideoEtAudio/PS150.VideoEtAudio.csproj" />
 </Solution>

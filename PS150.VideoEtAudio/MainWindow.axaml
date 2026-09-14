@@ -1,0 +1,12 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vlc="clr-namespace:LibVLCSharp.Avalonia;assembly=LibVLCSharp.Avalonia"
+        x:Class="PS150.VideoEtAudio.MainWindow"
+        Title="PS150"
+        WindowState="FullScreen"
+        Background="Black">
+    <!-- WindowState="FullScreen" je vestavěná hodnota přímo v Avalonii -
+         na rozdíl od WPF tu není potřeba ruční kombinace
+         WindowStyle.None + Maximized + Topmost. -->
+    <vlc:VideoView Name="VideoViewer" />
+</Window>

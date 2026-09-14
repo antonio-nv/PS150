@@ -109,6 +109,15 @@ namespace PS150.UI.Windows
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        // Nastaveno jednou v Run() hned po GetConsoleWindow() - ať má
+        // RenderDashboard() přístup k handle okna a pozná, jestli je zrovna
+        // aktivní, aniž by se muselo měnit jeho podpis (volá se odjinud na
+        // desítkách míst v celém souboru).
+        private static IntPtr _consoleHwnd = IntPtr.Zero;
+
         // --- Odstranění title baru + náhradní tažení myší za dekorativní
         // horní okraj konzole (řádek y==0), viz použití v Run()/mouse handleru níž.
         [DllImport("user32.dll", SetLastError = true)]
@@ -295,6 +304,7 @@ namespace PS150.UI.Windows
             // 1. Otevření konzole a vynucení fokusu
             AllocConsole();
             IntPtr hwnd = GetConsoleWindow();
+            _consoleHwnd = hwnd;
             if (hwnd != IntPtr.Zero)
             {
                 SetForegroundWindow(hwnd);
@@ -943,7 +953,6 @@ namespace PS150.UI.Windows
             string fileName = Path.GetFileName(currentFile);
             string folderPath = Path.GetDirectoryName(currentFile) ?? "";
             string fullPath = $"{folderPath}\\{fileName}";
-            string modeLabel = _isMidiMode ? "MIDI PASS-THROUGH" : "AUDIO STREAM (WASAPI)";
 
             TimeSpan current = _isMidiMode ? _midiPlayer.CurrentTime : _audioPlayer.CurrentTime;
             TimeSpan total = _isMidiMode ? _midiPlayer.TotalTime : _audioPlayer.TotalTime;
@@ -954,24 +963,28 @@ namespace PS150.UI.Windows
 
             // --- Řádek 0: textový title bar ---
             // Vlevo "♪♫ PS150 Player.", vpravo [_][□][X] zarovnané na pravý
-            // okraj, mezi tím pozadí táhnoucí se přes celý řádek.
+            // okraj, mezi tím pozadí táhnoucí se přes celý řádek. Barva se
+            // liší podle toho, jestli je okno zrovna aktivní (má fokus) -
+            // stejně jako u běžného Windows title baru.
+            bool isActive = _consoleHwnd != IntPtr.Zero && GetForegroundWindow() == _consoleHwnd;
+
             const string titleText = "♪♫ PS150 Player.";
             const string ctrlBlock = "[_][□][X]";
             int padLen = Math.Max(0, ContentWidth - titleText.Length - ctrlBlock.Length);
 
-            Console.BackgroundColor = ConsoleColor.DarkCyan;
-            Console.ForegroundColor = ConsoleColor.White;
+            Console.BackgroundColor = isActive ? ConsoleColor.DarkCyan : ConsoleColor.Black;
+            Console.ForegroundColor = isActive ? ConsoleColor.White : ConsoleColor.DarkGray;
             Console.Write(titleText);
             Console.Write(new string(' ', padLen));
-            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.ForegroundColor = isActive ? ConsoleColor.Yellow : ConsoleColor.DarkGray;
             Console.Write("[_]");
             Console.ForegroundColor = ConsoleColor.DarkGray; // maximalizace je záměrně vyřazená, viz HandleTitleBarClick
             Console.Write("[□]");
-            Console.ForegroundColor = ConsoleColor.White;
+            Console.ForegroundColor = isActive ? ConsoleColor.White : ConsoleColor.DarkGray;
             Console.Write("[");
-            Console.ForegroundColor = ConsoleColor.Red;
+            Console.ForegroundColor = isActive ? ConsoleColor.Red : ConsoleColor.DarkGray;
             Console.Write("X");
-            Console.ForegroundColor = ConsoleColor.White;
+            Console.ForegroundColor = isActive ? ConsoleColor.White : ConsoleColor.DarkGray;
             Console.Write("]");
             Console.ResetColor();
             Console.WriteLine();
@@ -1027,11 +1040,8 @@ namespace PS150.UI.Windows
             Console.ResetColor();
             Console.WriteLine();
 
-            // --- Řádek 4: režim ---
+            // --- Řádek 4: oddělovač ---
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine($" {modeLabel}".PadRight(ContentWidth));
-
-            // --- Řádek 5: oddělovač ---
             Console.WriteLine(separator);
             Console.ResetColor();
 
@@ -1046,9 +1056,9 @@ namespace PS150.UI.Windows
             Console.WriteLine(thinSeparator);
             Console.ResetColor();
 
-            // Řádky: title(1) + sep(1) + vol(1) + transport(1) + mode(1) + sep(1)
+            // Řádky: title(1) + sep(1) + vol(1) + transport(1) + sep(1)
             //       + cesta (pathLines.Count) + tenký oddělovač(1)
-            _contentStartRow = 6 + pathLines.Count + 1;
+            _contentStartRow = 5 + pathLines.Count + 1;
         }
 
         /// <summary>
@@ -1056,6 +1066,15 @@ namespace PS150.UI.Windows
         /// delší ořízne a označí "…". Používá se všude v úzkém 30znakovém
         /// layoutu, ať se žádný řádek nikdy neroztáhne mimo okno.
         /// </summary>
+        // Poslední výška okna, o kterou jsme si SAMI požádali - EnsureWindowHeight()
+        // provede skutečnou změnu jen když se aktuálně požadovaná výška liší
+        // od tyhle, NE podle toho, co zrovna hlásí Console.WindowHeight. Ten
+        // se totiž po SetWindowSize() nemusí ihned ustálit (hlavně ve Windows
+        // Terminalu) - kdyby se porovnávalo přímo s ním při KAŽDÉM tiku (30x
+        // za sekundu), mohlo by se to donekonečna přepočítávat a čistit, což
+        // právě způsobovalo to "utíkání" okna pryč.
+        private static int _lastDesiredHeight = -1;
+
         private static string FitWidth(string text, int width)
         {
             if (width <= 0) return "";
@@ -1063,8 +1082,44 @@ namespace PS150.UI.Windows
             return width == 1 ? text.Substring(0, 1) : text.Substring(0, width - 1) + "…";
         }
 
+        /// <summary>
+        /// Přizpůsobí výšku okna přesně tomu, kolik řádků obsah skutečně
+        /// potřebuje. Skutečnou změnu provede jen tehdy, když se požadovaná
+        /// výška doopravdy liší od poslední, o kterou jsme si sami řekli
+        /// (viz _lastDesiredHeight) - nikdy podle aktuálního
+        /// Console.WindowHeight, viz komentář u pole výše. Vrací true, pokud
+        /// k reálné změně došlo - volající pak musí znovu překreslit i
+        /// hlavičku (RenderDashboard), protože změna velikosti bufferu obsah
+        /// smaže.
+        /// </summary>
+        private static bool EnsureWindowHeight(int desiredHeight)
+        {
+            desiredHeight = Math.Clamp(desiredHeight, 10, 60);
+            if (desiredHeight == _lastDesiredHeight) return false;
+            _lastDesiredHeight = desiredHeight;
+
+            try
+            {
+                Console.SetWindowSize(1, 1);
+                Console.SetBufferSize(ConsoleWidth, desiredHeight);
+                Console.SetWindowSize(ConsoleWidth, desiredHeight);
+                Console.Clear();
+            }
+            catch { }
+
+            return true;
+        }
+
         private static void RenderMetersOnly()
         {
+            // Obsah VU metrů má vždycky přesně 7 řádků (L,R,H,S,V,Reg,Akt) -
+            // na rozdíl od MIDI osnov se nemění podle souboru.
+            const int contentRows = 7;
+            if (EnsureWindowHeight(_contentStartRow + contentRows))
+            {
+                RenderDashboard(); // velikost se změnila -> hlavička je pryč, překreslit
+            }
+
             Console.SetCursorPosition(0, _contentStartRow);
 
             const int barWidth = 14;
@@ -1131,8 +1186,6 @@ namespace PS150.UI.Windows
 
         private static void RenderMidiStaffOnly()
         {
-            Console.SetCursorPosition(0, _contentStartRow);
-
             // Jednoduchý náhled osnov - jeden řádek pro každou notovou osnovu
             // (kanál), kterou soubor používá, řádky pod sebou. Osnovy se
             // zobrazují TRVALE (nemizí, když zrovna nic nehrají) - jen se jim
@@ -1154,20 +1207,34 @@ namespace PS150.UI.Windows
                 // (viz GmPianoMidiPlayer.PlaybackFailed) a ukážeme proč, ať se
                 // dá diagnostikovat, i kdyby v adresáři bylo víc vadných
                 // souborů za sebou.
+                var errorLines = WrapPath(errorMessage, ContentWidth - 1);
+                if (EnsureWindowHeight(_contentStartRow + 1 + errorLines.Count))
+                {
+                    RenderDashboard();
+                }
+
+                Console.SetCursorPosition(0, _contentStartRow);
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine(FitWidth(" CHYBA přehrávání:", ContentWidth));
-                foreach (string line in WrapPath(errorMessage, ContentWidth - 1))
+                foreach (string line in errorLines)
                 {
                     Console.WriteLine(FitWidth($" {line}", ContentWidth));
                 }
                 Console.ResetColor();
-
-                for (int i = 0; i < 8; i++)
-                {
-                    Console.WriteLine(new string(' ', ContentWidth));
-                }
                 return;
             }
+
+            // Kolik řádků bude potřeba - zjistí se PŘEDEM, ať se dá okno
+            // přizpůsobit ještě před vlastním vypisováním (jinak by se
+            // muselo kreslit dvakrát).
+            string? seekDiagnostic = _midiPlayer.LastSeekDiagnostic;
+            int contentRows = Math.Max(usedChannels.Length, 1) + (string.IsNullOrEmpty(seekDiagnostic) ? 0 : 1);
+            if (EnsureWindowHeight(_contentStartRow + contentRows))
+            {
+                RenderDashboard();
+            }
+
+            Console.SetCursorPosition(0, _contentStartRow);
 
             var notesByChannel = activeNotesSnapshot
                 .GroupBy(n => n.Channel)
@@ -1175,7 +1242,6 @@ namespace PS150.UI.Windows
 
             // Kompaktní popisek kanálu - "C01".."C16", bicí kanál (10) jako "D10" -
             // na 30 znaků širokém řádku není místo na dřívější "Ch01"/"Ch10[DRUM]".
-            int staffLines = 0;
             foreach (int channel in usedChannels)
             {
                 string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
@@ -1189,32 +1255,21 @@ namespace PS150.UI.Windows
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine(FitWidth(notes, ContentWidth - label.Length));
                 Console.ResetColor();
-                staffLines++;
             }
 
-            if (staffLines == 0)
+            if (usedChannels.Length == 0)
             {
                 Console.WriteLine(FitWidth(" (osnovy zatím nerozpoznané)", ContentWidth));
-                staffLines = 1;
             }
 
             // Diagnostika převíjení (ne fatální chyba, jen info k ladění) -
             // vypisujeme ji sem místo jen Debug.WriteLine, protože to je
             // v Release buildu jinak úplně neviditelné.
-            string? seekDiagnostic = _midiPlayer.LastSeekDiagnostic;
             if (!string.IsNullOrEmpty(seekDiagnostic))
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine(FitWidth($" [Seek] {seekDiagnostic}", ContentWidth));
                 Console.ResetColor();
-                staffLines++;
-            }
-
-            // Smažeme případný zbytek předchozích (delších) osnov, ať staré řádky
-            // nezůstanou "viset" pod aktuálním výpisem po zmenšení počtu kanálů.
-            for (int i = staffLines; i < 17; i++)
-            {
-                Console.WriteLine(new string(' ', ContentWidth));
             }
         }
 
