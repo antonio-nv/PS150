@@ -1,0 +1,24 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PS150.VideoEtAudio.AudioPlayerWindow"
+        Title="♪♫ PS150 Player"
+        Width="360" Height="220"
+        CanResize="False"
+        Background="Black"
+        FontFamily="Consolas,Cascadia Mono,DejaVu Sans Mono,monospace">
+    <!-- FontFamily je záměrně seznam alternativ oddělený čárkou - Avalonia
+         si vybere první dostupnou na daném OS (Consolas na Windows,
+         DejaVu Sans Mono na většině Linuxů). Není to stoprocentně pixel
+         identické, ale vizuálně velmi blízké na obou platformách bez
+         nutnosti balit vlastní font do appky - to je varianta na později,
+         kdyby tahle nestačila. -->
+    <StackPanel Margin="12" Spacing="6">
+        <TextBlock x:Name="FileNameText" Foreground="White" FontSize="14" TextWrapping="Wrap" Text="(žádný soubor)"/>
+        <TextBlock x:Name="TimeText" Foreground="Cyan" FontSize="14" Text="00:00 / 00:00"/>
+        <TextBlock x:Name="VolumeText" Foreground="Cyan" FontSize="14" Text="Vol: 80%"/>
+        <TextBlock x:Name="TransportText" Foreground="Yellow" FontSize="16" Text="[&lt;&lt;] [►] [&gt;&gt;]"/>
+        <TextBlock Foreground="DarkGray" FontSize="12" Margin="0,12,0,0"
+                   Text="Mezerník=pauza  Šipky=čas/hlasitost  PgUp/PgDn=soubor  Esc=konec"
+                   TextWrapping="Wrap"/>
+    </StackPanel>
+</Window>

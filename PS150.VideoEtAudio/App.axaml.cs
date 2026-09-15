@@ -15,17 +15,27 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            var window = new MainWindow();
-            desktop.MainWindow = window;
+            string? filePath = desktop.Args is { Length: > 0 } ? desktop.Args[0] : null;
 
-            if (desktop.Args is { Length: > 0 })
+            if (filePath != null && PS150.Core.MediaKind.IsVideo(filePath))
             {
-                // Počká na Opened, ať je VideoView opravdu hotové, než přijde Play()
-                window.Opened += (s, e) => window.PlayFile(desktop.Args[0]);
+                var window = new MainWindow();
+                desktop.MainWindow = window;
+                window.Opened += (s, e) => window.PlayFile(filePath);
+            }
+            else
+            {
+                var window = new AudioPlayerWindow();
+                desktop.MainWindow = window;
+                if (filePath != null)
+                {
+                    window.Opened += (s, e) => window.PlayFile(filePath);
+                }
             }
         }
 
         base.OnFrameworkInitializationCompleted();
     }
+
 
 }
