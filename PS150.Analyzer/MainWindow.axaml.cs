@@ -14,6 +14,8 @@ namespace PS150.VideoEtAudio
 
         private LibVLC? _libVLC;
         private MediaPlayer? _mediaPlayer;
+        private bool _videoViewReady = false;
+        private string? _pendingFile;
 
         public MainWindow()
         {
@@ -37,10 +39,31 @@ namespace PS150.VideoEtAudio
             _mediaPlayer.EnableKeyInput = false;
             _mediaPlayer.EnableMouseInput = false;
 
+            // DŮLEŽITÉ: "Opened" u okna je pořád MOC BRZY. Nativní "úchyt",
+            // do kterého LibVLC kreslí obraz, vzniká uvnitř VideoView až ve
+            // chvíli, kdy se ten konkrétní ovládací prvek připojí do
+            // vizuálního stromu (AttachedToVisualTree) - a to může nastat
+            // i PO Opened okna. Pokud LibVLC dostane Play() dřív, než tohle
+            // proběhne, nemá kam kreslit a nouzově si otevře VLASTNÍ okno
+            // ("VLC (Direct3D11 output)") - přesně tenhle bug popisuje i
+            // vývojář LibVLC na jejich vlastním fóru.
             var videoView = this.FindControl<VideoView>("VideoViewer");
             if (videoView != null)
             {
-                videoView.MediaPlayer = _mediaPlayer;
+                videoView.AttachedToVisualTree += (s, e) =>
+                {
+                    videoView.MediaPlayer = _mediaPlayer;
+                    _videoViewReady = true;
+
+                    // Pokud mezitím přišel požadavek na přehrání (z App.axaml.cs),
+                    // ale VideoView ještě nebylo připravené, čekal na tuhle chvíli.
+                    if (_pendingFile != null)
+                    {
+                        string file = _pendingFile;
+                        _pendingFile = null;
+                        PlayFile(file);
+                    }
+                };
             }
 
             // DŮLEŽITÉ: obyčejné "KeyDown +=" (bublající fáze) se u VideoView
@@ -63,8 +86,9 @@ namespace PS150.VideoEtAudio
                 closeOverlay.SetCloseAction(Close);
                 closeOverlay.Show(this); // vlastnictví se v Avalonii nastavuje takhle, ne přes { Owner = this }
 
-                // Pravý horní roh obrazovky.
-                var screen = Screens.Primary;
+                // Obrazovka, na které TOHLE okno skutečně leží - ne
+                // "primární" monitor obecně (relevantní při víc monitorech).
+                var screen = Screens.ScreenFromWindow(this) ?? Screens.Primary;
                 if (screen != null)
                 {
                     closeOverlay.Position = new Avalonia.PixelPoint(
@@ -74,10 +98,16 @@ namespace PS150.VideoEtAudio
             };
         }
 
-        /// <summary>Volá se z App.axaml.cs, až je okno skutečně vytvořené (Opened) - ať je VideoView připravené dřív, než přijde Play().</summary>
+        /// <summary>Volá se z App.axaml.cs. Pokud VideoView ještě není připravené (viz AttachedToVisualTree výše), přehrání se odloží.</summary>
         public void PlayFile(string filePath)
         {
             if (!File.Exists(filePath)) return;
+
+            if (!_videoViewReady)
+            {
+                _pendingFile = filePath;
+                return;
+            }
 
             _navigator.LoadDirectory(filePath);
             StartPlayingCurrentFile();

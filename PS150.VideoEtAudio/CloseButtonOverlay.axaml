@@ -1,0 +1,26 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PS150.VideoEtAudio.CloseButtonOverlay"
+        Width="44" Height="44"
+        SystemDecorations="None"
+        Background="Transparent"
+        CanResize="False"
+        ShowInTaskbar="False"
+        Topmost="True">
+    <!-- Malé, vždycky viditelné tlačítko na zavření - řeší to, že klávesnice
+         (Escape) se na Linuxu k oknu s videem někdy vůbec nedostane (viz
+         komentář v MainWindow.axaml.cs). Klik myší funguje spolehlivě bez
+         ohledu na to, kdo má zrovna klávesový fokus. -->
+    <Border Background="#AA000000" CornerRadius="4">
+        <Button Name="CloseButton"
+                Content="✕"
+                Foreground="White"
+                Background="Transparent"
+                BorderThickness="0"
+                FontSize="18"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                HorizontalContentAlignment="Center"
+                VerticalContentAlignment="Center"/>
+    </Border>
+</Window>
