@@ -5,12 +5,15 @@ rozšíření (elektronické varhany na Raspberry Pi).
 
 ## Projekty v tomto řešení
 
-- **PS150.UI.Windows** – přehrávač audio/video souborů (mp3, wav, flac, MIDI, video),
-  napojení na MIDI-IN. Zatím ve fázi provizorního textového rozhraní.
-- **PS150.Core** – SW syntezátor zvuku (oscilátory, obálky, filtry, hlasy nástrojů).
+- **PS150.UI.Windows** – přehrávač audio souborů (mp3, wav, flac, MIDI,), přehrávač video souborů (avi, MP4)
+  napojení na MIDI-IN. Provizorně zatím používá SW knihovnu GM z windows 11 pro přehrávání souborů MIDI
+- **PS150.UI.Linux** – přehrávač audio souborů (mp3, wav, flac, MIDI,), přehrávač video souborů (avi, MP4)
+  napojení na MIDI-IN. plán do budouctna
+- **PS150.UI.VideoEtAudio** – přehrávač audio souborů (mp3, wav, flac, MIDI,), přehrávač video souborů (avi, MP4)
+  napojení na MIDI-IN. plán do budouctna, bude používat AVOLINIA, teda, až bude dostatečně vyzrálá.
+- **PS150.Core** – SW syntezátor zvuku (oscilátory, obálky, filtry, hlasy nástrojů). Společné metody pro přehrávač souborů
 - **PS150.Analyzer** – SW analyzátor zvuku s 2D grafy (WPF).
-- **PS150.Raspi** – plánovaná hardwarová větev (Raspberry Pi, HiFiBerry DAC8x,
-  MIDI in/out, GPIO ovládání kláves).
+- **PS150.Raspi** – plánovaný hardwarový syntezátor (Raspberry Pi, HiFiBerry DAC8x, MIDI in/out, GPIO ovládání kláves).
 
 ## Stav projektu
 
