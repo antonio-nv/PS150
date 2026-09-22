@@ -215,7 +215,7 @@ namespace PS150.UI.Windows
                         {
                             // Navigace přejela na zvuk/MIDI - tohle okno
                             // (video) tady končí, MediaLauncher pokračuje
-                            // spuštěním VGA konzole na tomhle souboru.
+                            // spuštěním FileBrowserWindow na tomhle souboru.
                             HandoffFile = next;
                             Close();
                             break;

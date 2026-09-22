@@ -50,11 +50,19 @@ namespace PS150.UI.Windows
                 }
                 else
                 {
-                    // MIDI i ostatní zvukové soubory řeší VgaEngine společně
-                    // (viz GmPianoMidiPlayer pro .mid, AudioPlayer pro
-                    // ostatní) - PS150.Core/ToneEngine zůstává nedotčený,
+                    // MIDI i ostatní zvukové soubory řeší FileBrowserWindow
+                    // společně (viz GmPianoMidiPlayer pro .mid, AudioPlayer
+                    // pro ostatní) - PS150.Core/ToneEngine zůstává nedotčený,
                     // slouží dál jen pro živé hraní z MIDI-IN klávesnice.
-                    nextFile = VgaEngine.Run(nextFile);
+                    // Stejný ShowDialog()+Handoff vzor jako o pár řádků výš
+                    // u MainWindow (video) - dřív tu bylo VgaEngine.Run(),
+                    // což byla textová Windows konzole; teď normální WPF
+                    // okno, viz FileBrowserWindow.xaml.cs.
+                    var browserWindow = new FileBrowserWindow();
+                    Application.Current.MainWindow = browserWindow;
+                    browserWindow.LoadFile(nextFile);
+                    browserWindow.ShowDialog();
+                    nextFile = browserWindow.HandoffFile;
                 }
             }
 
@@ -135,8 +143,11 @@ namespace PS150.UI.Windows
             }
             else
             {
-                // Pokud soubor neexistuje, otevře se konzole naprázdno pro hraní na piano
-                VgaEngine.Run("");
+                // Pokud soubor neexistuje, otevře se okno naprázdno pro hraní na piano
+                var browserWindow = new FileBrowserWindow();
+                Application.Current.MainWindow = browserWindow;
+                browserWindow.LoadFile("");
+                browserWindow.ShowDialog();
                 Shutdown();
             }
         }
