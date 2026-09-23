@@ -54,7 +54,7 @@ namespace PS150.UI.Windows
         private readonly GmPianoMidiPlayer _midiPlayer = new();
 
         private readonly object _midiNotesLock = new object();
-        private readonly HashSet<(int Channel, int Note)> _midiActiveNotes = new();
+        private readonly Dictionary<(int Channel, int Note), double> _midiActiveNotes = new();
         private int[] _midiUsedChannels = Array.Empty<int>();
         private bool _midiFinishedNaturally = false;
         private string? _midiErrorMessage = null;
@@ -120,9 +120,9 @@ namespace PS150.UI.Windows
 
         private void WireMidiPlayerEvents()
         {
-            _midiPlayer.NoteOnRaised += (channel, note) =>
+            _midiPlayer.NoteOnRaised += (channel, note, bendCents) =>
             {
-                lock (_midiNotesLock) { _midiActiveNotes.Add((channel, note)); }
+                lock (_midiNotesLock) { _midiActiveNotes[(channel, note)] = bendCents; }
             };
             _midiPlayer.NoteOffRaised += (channel, note) =>
             {
@@ -687,12 +687,14 @@ namespace PS150.UI.Windows
         private void RenderMidiStaffOnly()
         {
             int[] usedChannels;
-            (int Channel, int Note)[] activeNotesSnapshot;
+            (int Channel, int Note, double BendCents)[] activeNotesSnapshot;
             string? errorMessage;
             lock (_midiNotesLock)
             {
                 usedChannels = _midiUsedChannels;
-                activeNotesSnapshot = _midiActiveNotes.ToArray();
+                activeNotesSnapshot = _midiActiveNotes
+                    .Select(kv => (Channel: kv.Key.Channel, Note: kv.Key.Note, BendCents: kv.Value))
+                    .ToArray();
                 errorMessage = _midiErrorMessage;
             }
 
@@ -726,13 +728,15 @@ namespace PS150.UI.Windows
 
             var notesByChannel = activeNotesSnapshot
                 .GroupBy(n => n.Channel)
-                .ToDictionary(g => g.Key, g => g.Select(n => n.Note).OrderBy(n => n).ToArray());
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderBy(n => n.Note).ToArray());
 
             foreach (int channel in usedChannels)
             {
                 string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
-                string notes = notesByChannel.TryGetValue(channel, out var noteNumbers)
-                    ? string.Join(" ", noteNumbers.Select(NoteNumberToName))
+                string notes = notesByChannel.TryGetValue(channel, out var noteEntries)
+                    ? string.Join(" ", noteEntries.Select(n => NoteNumberToName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
                     : "";
 
                 string label = $" {channelLabel}:";
@@ -756,12 +760,86 @@ namespace PS150.UI.Windows
             }
         }
 
-        private static string NoteNumberToName(int noteNumber)
+        // Přirozené tóny (bez křížku/béčka) a jejich výška v centech od C
+        // v rámci jedné oktávy - jediná tabulka pro všechno (běžné
+        // půltóny i čtvrttóny/tříčtvrttóny), viz NoteNumberToName níž.
+        private static readonly (char Letter, int Cents)[] Naturals =
         {
-            string[] names = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-            int octave = (noteNumber / 12) - 1;
-            string name = names[((noteNumber % 12) + 12) % 12];
-            return $"{name}{octave}";
+            ('C', 0), ('D', 200), ('E', 400), ('F', 500), ('G', 700), ('A', 900), ('B', 1100),
+        };
+
+        /// <summary>
+        /// Název noty vč. čtvrttónové/tříčtvrttónové odchylky. `bendCents`
+        /// je aktuální pitch bend kanálu v centech v okamžiku NoteOn (0 pro
+        /// běžné, nečtvrttónové soubory). Značka (¼/¾, #/b) se píše PŘED
+        /// písmenem, jak požadováno - např. "¼#C5", "¾bC5", "bG5".
+        ///
+        /// Na rozdíl od dřívější verze se písmeno NEODVOZUJE ze syrového
+        /// čísla MIDI noty (to by čtvrttóny/tříčtvrttóny vždycky ukázalo
+        /// jako křížek, nikdy jako béčko - viz historie v konverzaci) -
+        /// místo toho se hledá nejbližší přirozený tón (C/D/E/F/G/A/B) k
+        /// výsledné výšce (nota+ohyb dohromady). Když je přesně uprostřed
+        /// mezi dvěma sousedními přirozenými tóny (klasický případ černé
+        /// klávesy bez ohybu, ale stejně tak čtvrttón přesně "mezi" notami),
+        /// rozhoduje `preferFlats` (z tóniny souboru).
+        /// </summary>
+        private static string NoteNumberToName(int noteNumber, double bendCents, bool preferFlats)
+        {
+            double totalCents = noteNumber * 100.0 + bendCents;
+            double localBase = Math.Floor(totalCents / 1200.0) * 1200.0;
+
+            char bestLetter = 'C';
+            double bestCents = 0;
+            double bestDist = double.MaxValue;
+
+            for (int octaveShift = -1; octaveShift <= 1; octaveShift++)
+            {
+                double candidateBase = localBase + octaveShift * 1200.0;
+                foreach (var (letter, cents) in Naturals)
+                {
+                    double candidateCents = candidateBase + cents;
+                    double dist = Math.Abs(totalCents - candidateCents);
+
+                    bool strictlyBetter = dist < bestDist - 0.01;
+                    bool tied = Math.Abs(dist - bestDist) <= 0.01;
+                    bool preferThisOnTie = tied && PreferCandidate(totalCents, candidateCents, preferFlats);
+
+                    if (strictlyBetter || preferThisOnTie)
+                    {
+                        bestLetter = letter;
+                        bestCents = candidateCents;
+                        bestDist = dist;
+                    }
+                }
+            }
+
+            int quarterSteps = (int)Math.Round((totalCents - bestCents) / 50.0, MidpointRounding.AwayFromZero);
+            int octave = (int)Math.Floor(bestCents / 1200.0) - 1;
+
+            string accidental = quarterSteps switch
+            {
+                0 => "",
+                1 => "¼#",
+                2 => "#",
+                3 => "¾#",
+                -1 => "¼b",
+                -2 => "b",
+                -3 => "¾b",
+                // Extrémnější odchylky (nad tříčtvrttón) - v běžné hudbě se
+                // nestávají, a i kdyby, čtvrttónová hudba je stejně naprosto
+                // šílená, takže tady stačí cokoliv rozumně čitelného.
+                > 3 => $"{quarterSteps}q#",
+                _ => $"{-quarterSteps}qb",
+            };
+
+            return $"{accidental}{bestLetter}{octave}";
+        }
+
+        /// <summary>Při přesné shodě dvou stejně vzdálených přirozených tónů: preferFlats=true chce tón NAD (vyjde to jako béčko), jinak tón POD (vyjde to jako křížek).</summary>
+        private static bool PreferCandidate(double totalCents, double candidateCents, bool preferFlats)
+        {
+            bool candidateIsAbove = candidateCents > totalCents;
+            return preferFlats ? candidateIsAbove : !candidateIsAbove;
         }
     }
 }

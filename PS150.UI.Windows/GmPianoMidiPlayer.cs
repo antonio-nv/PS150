@@ -59,6 +59,22 @@ namespace PS150.UI.Windows
 
         private const int PanControlNumber = 10;   // GM/MIDI Control Change č. 10 = Pan
         private const int VolumeControlNumber = 7;  // GM/MIDI Control Change č. 7 = Channel Volume
+
+        // Výchozí rozsah pitch bendu podle General MIDI (±2 půltóny = ±200
+        // centů na plný rozsah ±8192). Soubory se čtvrttóny tenhle výchozí
+        // rozsah nemění (žádný RPN 0,0 na Pitch Bend Sensitivity), takže
+        // 50 centů (čtvrttón) = 2048, 100 centů (půltón) = 4096, 150 centů
+        // (tříčtvrttón) = 6144 z plného rozsahu ±8192.
+        private const double PitchBendRangeCents = 200.0;
+        private readonly double[] _channelBendCents = new double[16];
+
+        /// <summary>
+        /// True, pokud tónina souboru (viz KeySignatureEvent) preferuje
+        /// béčka (F dur, B dur, Es dur...) - používá se při zobrazování
+        /// názvů not, aby se černé klávesy neukazovaly automaticky jako
+        /// křížky, když skladba je zjevně v béčkové tónině.
+        /// </summary>
+        public bool KeyPrefersFlats { get; private set; }
         private const int PanLeft = 0;
         private const int PanCenter = 64;
         private const int PanRight = 127;
@@ -105,7 +121,7 @@ namespace PS150.UI.Windows
         }
 
         /// <summary>Vyvoláno při rozeznění noty. Parametry: (kanál 0-15, MIDI číslo noty).</summary>
-        public event Action<int, int>? NoteOnRaised;
+        public event Action<int, int, double>? NoteOnRaised;
 
         /// <summary>Vyvoláno při doznění noty. Parametry: (kanál 0-15, MIDI číslo noty).</summary>
         public event Action<int, int>? NoteOffRaised;
@@ -168,6 +184,18 @@ namespace PS150.UI.Windows
                     .Distinct()
                     .OrderBy(c => c)
                     .ToArray();
+
+                // Tónina souboru - Key < 0 znamená béčkovou tóninu (F dur,
+                // B dur, Es dur...). Bereme první KeySignatureEvent v
+                // souboru (typicky hned na začátku); pokud soubor žádný
+                // nemá, KeyPrefersFlats zůstává false (křížky, jako dřív).
+                var keySignature = midiFile.GetTimedEvents()
+                    .Select(te => te.Event)
+                    .OfType<KeySignatureEvent>()
+                    .FirstOrDefault();
+                KeyPrefersFlats = keySignature != null && keySignature.Key < 0;
+
+                Array.Clear(_channelBendCents, 0, _channelBendCents.Length);
             }
             catch (Exception ex)
             {
@@ -249,9 +277,21 @@ namespace PS150.UI.Windows
                                 // řeší jen kanálovou/celkovou hlasitost.
                                 break;
 
+                            case PitchBendEvent pitchBend:
+                                // Sledujeme aktuální ohyb kanálu - potřeba
+                                // při NoteOn níž pro zobrazení čtvrttónových/
+                                // tříčtvrttónových odchylek (viz NoteNumberToName
+                                // ve FileBrowserWindow.xaml.cs). Zvukově se
+                                // pořád posílá beze změny na výstupní zařízení,
+                                // stejně jako dřív přes "default" větev.
+                                _channelBendCents[pitchBend.Channel] =
+                                    (pitchBend.PitchValue - 8192) / 8192.0 * PitchBendRangeCents;
+                                _outputDevice.SendEvent(pitchBend);
+                                break;
+
                             case NoteOnEvent noteOn:
                                 _outputDevice.SendEvent(noteOn);
-                                NoteOnRaised?.Invoke(noteOn.Channel, noteOn.NoteNumber);
+                                NoteOnRaised?.Invoke(noteOn.Channel, noteOn.NoteNumber, _channelBendCents[noteOn.Channel]);
                                 break;
 
                             case NoteOffEvent noteOff:
