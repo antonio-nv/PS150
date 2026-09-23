@@ -93,6 +93,16 @@ namespace PS150.UI.Windows
             if (rows == Rows) return;
             Rows = rows;
             _cells = new Cell[rows, Cols];
+
+            // InvalidateVisual() samo o sobě jen řekne "překresli se znovu se
+            // stejným rozvržením" - nutíme layout systém přepočítat i
+            // Measure/Arrange (viz MeasureOverride/ArrangeOverride níž),
+            // jinak zůstane vlastní "slot" mřížky ve starých rozměrech, i
+            // když OnRender kreslí nový (třeba vyšší) počet řádků - přesně
+            // tohle způsobovalo, že se spodní řádky (VU metry, cesta k
+            // souboru) nevešly do okna.
+            InvalidateMeasure();
+            InvalidateArrange();
             Clear();
         }
 

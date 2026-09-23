@@ -233,6 +233,16 @@ namespace PS150.UI.Windows
 
         private void Window_KeyDown(object sender, KeyEventArgs e)
         {
+            // Alt+F4 - stejná hláška jako v MainWindow.xaml.cs. Bez týhle
+            // výjimky by ho spolykalo e.Handled = true níž (nastavuje se
+            // po každé klávese, ať HandleInput nemusí řešit e.Handled samo) -
+            // tím by se systémový příkaz na zavření okna nikdy nedostal dál.
+            if (e.Key == Key.System && e.SystemKey == Key.F4)
+            {
+                Close();
+                return;
+            }
+
             bool keepRunning = HandleInput(e.Key);
             RenderDashboard();
             e.Handled = true;
