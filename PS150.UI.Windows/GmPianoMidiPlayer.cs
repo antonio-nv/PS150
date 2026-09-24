@@ -58,6 +58,29 @@ namespace PS150.UI.Windows
         private const int AcousticGrandPiano = 0;
 
         private const int PanControlNumber = 10;   // GM/MIDI Control Change č. 10 = Pan
+        // Kanál č. 10 podle GM standardu je index 9 (kanály se číslují od 0).
+        private const int PercussionChannel = 9;
+        private bool _drumsEnabled = true;
+
+        /// <summary>True = rytmika (kanál D10) hraje normálně, false = je umlčená - viz TogglePercussion().</summary>
+        public bool DrumsEnabled => _drumsEnabled;
+
+        /// <summary>Zapne/vypne kanál D10 (rytmika) - klávesa D/d ve FileBrowserWindow. Při vypnutí umlčí i právě znějící bicí, ať nezůstane "viset" nota.</summary>
+        public void SetDrumsEnabled(bool enabled)
+        {
+            _drumsEnabled = enabled;
+
+            if (!enabled && _outputDevice != null)
+            {
+                // All Sound Off (CC 120) na kanálu D10 - umlčí okamžitě
+                // cokoliv, co už hraje, ne jen budoucí noty.
+                _outputDevice.SendEvent(new ControlChangeEvent((SevenBitNumber)120, (SevenBitNumber)0)
+                {
+                    Channel = (FourBitNumber)PercussionChannel
+                });
+            }
+        }
+
         private const int VolumeControlNumber = 7;  // GM/MIDI Control Change č. 7 = Channel Volume
 
         // Výchozí rozsah pitch bendu podle General MIDI (±2 půltóny = ±200
@@ -290,11 +313,13 @@ namespace PS150.UI.Windows
                                 break;
 
                             case NoteOnEvent noteOn:
+                                if (noteOn.Channel == PercussionChannel && !_drumsEnabled) break;
                                 _outputDevice.SendEvent(noteOn);
                                 NoteOnRaised?.Invoke(noteOn.Channel, noteOn.NoteNumber, _channelBendCents[noteOn.Channel]);
                                 break;
 
                             case NoteOffEvent noteOff:
+                                if (noteOff.Channel == PercussionChannel && !_drumsEnabled) break;
                                 _outputDevice.SendEvent(noteOff);
                                 NoteOffRaised?.Invoke(noteOff.Channel, noteOff.NoteNumber);
                                 break;

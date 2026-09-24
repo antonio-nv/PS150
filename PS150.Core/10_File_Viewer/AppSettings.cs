@@ -7,6 +7,7 @@ namespace PS150.Core
     public class AppSettings
     {
         public int Volume { get; set; } = 80;
+        public bool DrumsEnabled { get; set; } = true;
         public string? LastFolderPath { get; set; }
         public string? LastFilePath { get; set; }
         public long LastPositionMs { get; set; } = 0;

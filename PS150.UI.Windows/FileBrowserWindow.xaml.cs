@@ -379,6 +379,7 @@ namespace PS150.UI.Windows
                 {
                     _ = _midiPlayer.PlayAsync(currentFile);
                     _midiPlayer.SetVolume(_volume);
+                    _midiPlayer.SetDrumsEnabled(_settings.DrumsEnabled);
                 }
             }
             else
@@ -471,6 +472,16 @@ namespace PS150.UI.Windows
                     else _audioPlayer.Seek(-5.0);
                     break;
 
+                case Key.D:
+                    if (_isMidiMode)
+                    {
+                        bool newState = !_midiPlayer.DrumsEnabled;
+                        _midiPlayer.SetDrumsEnabled(newState);
+                        _settings.DrumsEnabled = newState;
+                        _settings.Save();
+                    }
+                    break;
+
                 case Key.Up:
                     ChangeVolume(5);
                     break;
@@ -551,9 +562,10 @@ namespace PS150.UI.Windows
             _grid.ForegroundColor = ConsoleColor.Cyan;
             _grid.WriteLine(separator);
 
-            // --- Řádek 1: hlasitost + čas ---
+            // --- Řádek 1: hlasitost + čas (+ stav rytmiky D10 u MIDI) ---
             _grid.ForegroundColor = ConsoleColor.Cyan;
-            _grid.WriteLine($" Vol:{_volume,3}% [{timeStr}]".PadRight(Cols));
+            string drumsIndicator = _isMidiMode ? (_midiPlayer.DrumsEnabled ? " D+" : " D-") : "";
+            _grid.WriteLine($" Vol:{_volume,3}% [{timeStr}]{drumsIndicator}".PadRight(Cols));
 
             // --- Řádek 2: transportní tlačítka (souřadnice viz AddTransportButtons) ---
             _grid.ForegroundColor = ConsoleColor.Yellow;
