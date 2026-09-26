@@ -62,6 +62,7 @@ namespace PS150.Core.ToneEngine
                 _501_Cembalo_Additivni.Preset,
                 _400_Zvon_Zikmund.Preset,
                 _600_Strings.Preset,
+                _700_Drums.Preset,
             };
 
             var dict = new Dictionary<int, VoicePreset>();
