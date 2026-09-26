@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using PS150.Core;
+using PS150.Core.Tones;
 
 namespace PS150.UI.Windows
 {
@@ -747,8 +748,11 @@ namespace PS150.UI.Windows
             foreach (int channel in usedChannels)
             {
                 string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
+                bool isDrumChannel = channel == 9;
                 string notes = notesByChannel.TryGetValue(channel, out var noteEntries)
-                    ? string.Join(" ", noteEntries.Select(n => NoteNumberToName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
+                    ? string.Join(" ", noteEntries.Select(n => isDrumChannel
+                        ? DrumAbbreviation(n.Note)
+                        : NoteNumberToName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
                     : "";
 
                 string label = $" {channelLabel}:";
@@ -795,6 +799,23 @@ namespace PS150.UI.Windows
         /// klávesy bez ohybu, ale stejně tak čtvrttón přesně "mezi" notami),
         /// rozhoduje `preferFlats` (z tóniny souboru).
         /// </summary>
+        /// <summary>
+        /// Zkratka GM bicího (kanál D10) podle čísla noty - stejná tabulka
+        /// jako u syntézy (_700_Drums.cs), takže se zobrazení nemůže
+        /// rozejít s tím, co skutečně hraje. Přehrávání .mid souborů tady
+        /// pořád jede přes GmPianoMidiPlayer (Windows GS Wavetable Synth),
+        /// ne přes DrumVoice - tahle tabulka se používá čistě pro název,
+        /// ne pro samotný zvuk.
+        /// </summary>
+        private static string DrumAbbreviation(int noteNumber)
+        {
+            foreach (var p in _700_Drums.Preset.DrumParameters)
+            {
+                if (p.GmNoteNumber == noteNumber) return p.Abbreviation;
+            }
+            return noteNumber.ToString(); // Neznámé číslo v tabulce - aspoň syrové číslo noty, ať je vidět, že něco hraje
+        }
+
         private static string NoteNumberToName(int noteNumber, double bendCents, bool preferFlats)
         {
             double totalCents = noteNumber * 100.0 + bendCents;

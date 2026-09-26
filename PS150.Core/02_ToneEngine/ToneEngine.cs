@@ -200,7 +200,7 @@ namespace PS150.Core.ToneEngine
                         continue;
                     }
 
-                    var voice = CreateVoice(preset, _sampleRate);
+                    var voice = CreateVoice(preset, noteNumber, _sampleRate);
                     voice.NoteOn();
 
                     _activeNotes.Add(new ActiveNote
@@ -230,7 +230,7 @@ namespace PS150.Core.ToneEngine
 
         // Vybere správnou třídu hlasu podle preset.Instrument. Všechny čtyři třídy
         // dědí ze SynthVoice, takže se dají držet v jednom společném seznamu.
-        private static SynthVoice CreateVoice(VoicePreset preset, double sampleRate)
+        private static SynthVoice CreateVoice(VoicePreset preset, int noteNumber, double sampleRate)
         {
             switch (preset.Instrument)
             {
@@ -242,6 +242,11 @@ namespace PS150.Core.ToneEngine
                     return new BellVoice(preset, sampleRate);
                 case InstrumentType.AdditiveString:
                     return new AdditiveStringVoice(preset, sampleRate);
+                case InstrumentType.Drums:
+                    // Na rozdíl od ostatních hlasů potřebuje vědět KTEROU
+                    // notu hrát (číslo noty = výběr zvuku, ne výška) - viz
+                    // DrumVoice.cs a komentář u DrumParameter.
+                    return new DrumVoice(preset, noteNumber, sampleRate);
                 case InstrumentType.Organ:
                 default:
                     return new OrganVoice(preset, sampleRate);

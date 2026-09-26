@@ -17,7 +17,39 @@
         Piano,
         Cembalo,
         Bell,
-        AdditiveString // Provizorní aditivní (alikvotová) struna - viz AdditiveStringVoice.cs
+        AdditiveString, // Provizorní aditivní (alikvotová) struna - viz AdditiveStringVoice.cs
+        Drums           // Bicí GM (35-81) - viz DrumVoice.cs a DrumParameter níž
+    }
+
+    // Kterou ze dvou metod má DrumVoice použít pro daný bicí zvuk (viz DrumParameter).
+    public enum DrumNoiseMethod
+    {
+        WideBandpass,   // Bílý šum -> dolní propust (LowHz) + horní propust (HighHz) v sérii - široké, "kartáčovité" pásmo (činely, hi-hat, virbl...)
+        NarrowBandpass  // Bílý šum -> rezonanční úzkopásmový filtr (CenterHz, Q) - tónově rozeznatelný "bouchanec" (bubny, tomy, konga...)
+    }
+
+    // Jeden bicí zvuk v rámci rejstříku 700 (viz VoicePreset.DrumParameters a
+    // _700_Drums.cs). GmNoteNumber je to, PODLE ČEHO se v DrumVoice vybírá
+    // (číslo MIDI noty na kanálu D10, 35-81), ne podle frekvence noty -
+    // bicí totiž nemají výšku tónu jako ostatní nástroje, číslo noty přímo
+    // VYBÍRÁ zvuk (kopák/virbl/hi-hat...), nepřepočítává se na kmitočet.
+    public struct DrumParameter
+    {
+        public int GmNoteNumber;      // 35-81, viz General MIDI Percussion Key Map
+        public string Name;           // Krátký název pro zobrazení, např. "Ac Bass Drum"
+        public string Abbreviation;   // 4 znaky pro úzké zobrazení (např. notová osnova v přehrávači souborů) - např. "LoTo" pro Low Tom
+        public DrumNoiseMethod Method;
+
+        // Pro Method == WideBandpass:
+        public double LowHz;
+        public double HighHz;
+
+        // Pro Method == NarrowBandpass:
+        public double CenterHz;
+        public double Q;
+
+        // Společná hlasitost výsledného zvuku (obě metody), 0.0-1.0+.
+        public double Amplitude;
     }
 
     public class VoicePreset
@@ -96,6 +128,12 @@
         // pro JAKÝKOLIV Instrument (Organ/Piano/Cembalo/Bell). Když necháš null,
         // každý hlas použije své vestavěné výchozí hodnoty (jako dosud).
         public AdsrEnvelope Envelope { get; set; } = null;
+
+        // --- Parametry pro Instrument == Drums (viz DrumVoice.cs) - jeden
+        // rejstřík (typicky Number=700) nese CELOU bicí soupravu, zvuk se
+        // vybírá podle GmNoteNumber (35-81), ne podle frekvence/noty jako
+        // u ostatních nástrojů. ---
+        public DrumParameter[] DrumParameters { get; set; } = null;
 
         // --- Parametry pro Instrument == Piano/Cembalo (fyzikální model struny,
         // Karplus-Strong - viz KarplusStrongString.cs). Organ/Bell tato pole
