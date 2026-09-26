@@ -41,6 +41,9 @@ namespace PS150.Core.Input
 
         public event Action<ConsoleInputEvent>? OnInputEvent;
 
+        /// <summary>True, pokud se při StartLiveDevice podařilo najít a připojit fyzické MIDI-IN zařízení (např. USB klaviatura).</summary>
+        public bool IsLiveDeviceConnected => _liveMidiDevice != null;
+
         public void StartLiveDevice(string deviceNameSearch = "USB MIDI")
         {
             try
