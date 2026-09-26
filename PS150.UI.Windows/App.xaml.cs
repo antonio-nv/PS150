@@ -79,6 +79,7 @@ namespace PS150.UI.Windows
         // Statická reference, aby k aktuálnímu AudioEngine (varhany) mohly
         // přistoupit i jiné statické třídy jako VgaEngine (pro VU metr).
         public static AudioEngine? OrganEngine { get; private set; }
+        public static InputManager? Input { get; private set; }
 
 
         protected override void OnStartup(StartupEventArgs e)
@@ -98,6 +99,7 @@ namespace PS150.UI.Windows
 
             // 2. INICIALIZACE CORE INPUTU (Živé piano z USB / Casio)
             _inputManager = new InputManager();
+            Input = _inputManager;
 
             _inputManager.OnInputEvent += evt =>
             {

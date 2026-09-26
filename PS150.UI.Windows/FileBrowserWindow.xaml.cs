@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -280,17 +280,23 @@ namespace PS150.UI.Windows
 
             RenderDashboard();
 
+            // L/R (zvukovka) jen když skutečně hraje soubor přes AudioPlayer
+            // - u .mid souborů jde zvuk mimo AudioPlayer (Windows GS
+            // Wavetable Synth), takže by tu nebylo co měřit.
             if (!_isMidiMode)
             {
                 var (peakL, peakR) = _audioPlayer.ReadPeakLevels();
+                float organPeakForLR = App.OrganEngine?.ReadPeak() ?? 0f;
+                _leftDb = AudioMeter.LinearToDecibels(Math.Max(peakL, organPeakForLR));
+                _rightDb = AudioMeter.LinearToDecibels(Math.Max(peakR, organPeakForLR));
+            }
 
-                float organPeak = App.OrganEngine?.ReadPeak() ?? 0f;
-                float combinedL = Math.Max(peakL, organPeak);
-                float combinedR = Math.Max(peakR, organPeak);
-
-                _leftDb = AudioMeter.LinearToDecibels(combinedL);
-                _rightDb = AudioMeter.LinearToDecibels(combinedR);
-
+            // H/S/V + Reg:/Akt: (varhanní engine) nezávisle na tom, co se
+            // zrovna prohlíží/přehrává (mp3/wav/flac/mid/prázdná konzole) -
+            // jen podle toho, jestli je fyzicky připojené MIDI-IN (klaviatura
+            // může hrát kdykoliv, bez ohledu na to, co je na obrazovce).
+            if (App.Input?.IsLiveDeviceConnected ?? false)
+            {
                 float bassPeak = 0f, midPeak = 0f, treblePeak = 0f;
                 if (App.OrganEngine != null)
                 {
@@ -303,13 +309,9 @@ namespace PS150.UI.Windows
                 _bassDb = AudioMeter.LinearToDecibels(bassPeak);
                 _midDb = AudioMeter.LinearToDecibels(midPeak);
                 _trebleDb = AudioMeter.LinearToDecibels(treblePeak);
+            }
 
-                RenderMetersOnly();
-            }
-            else
-            {
-                RenderMidiStaffOnly();
-            }
+            RenderStatusArea();
 
             _grid.Redraw();
         }
@@ -629,10 +631,56 @@ namespace PS150.UI.Windows
             _contentStartRow = 4 + pathLines.Count + 1;
         }
 
-        private void RenderMetersOnly()
+        /// <summary>
+        /// Sloučené vykreslení "stavové oblasti" pod cestou k souboru -
+        /// dřív to byly dvě vzájemně se vylučující metody (RenderMetersOnly
+        /// vs. RenderMidiStaffOnly), teď se skládá ze tří nezávislých bloků:
+        ///
+        ///  - L/R (zvukovka)     - jen když hraje soubor přes AudioPlayer (!_isMidiMode)
+        ///  - H/S/V + Reg:/Akt:  - vždy, když je připojené MIDI-IN (bez ohledu na soubor)
+        ///  - notová osnova      - jen u .mid souborů (_isMidiMode)
+        ///
+        /// Klaviatura na MIDI-IN totiž může hrát kdykoliv, bez ohledu na to,
+        /// co se zrovna prohlíží/přehrává - varhanní panel na tom tedy nesmí
+        /// záviset.
+        /// </summary>
+        private void RenderStatusArea()
         {
-            const int contentRows = 7;
-            if (EnsureRows(_contentStartRow + contentRows))
+            bool showAudioMeters = !_isMidiMode;
+            bool showOrganPanel = App.Input?.IsLiveDeviceConnected ?? false;
+
+            int[] usedChannels = Array.Empty<int>();
+            (int Channel, int Note, double BendCents)[] activeNotesSnapshot = Array.Empty<(int, int, double)>();
+            string? errorMessage = null;
+            List<string>? errorLines = null;
+            string? seekDiagnostic = null;
+            int staffRows = 0;
+
+            if (_isMidiMode)
+            {
+                lock (_midiNotesLock)
+                {
+                    usedChannels = _midiUsedChannels;
+                    activeNotesSnapshot = _midiActiveNotes
+                        .Select(kv => (Channel: kv.Key.Channel, Note: kv.Key.Note, BendCents: kv.Value))
+                        .ToArray();
+                    errorMessage = _midiErrorMessage;
+                }
+
+                if (errorMessage != null)
+                {
+                    errorLines = WrapPath(errorMessage, Cols - 1);
+                    staffRows = 1 + errorLines.Count;
+                }
+                else
+                {
+                    seekDiagnostic = _midiPlayer.LastSeekDiagnostic;
+                    staffRows = Math.Max(usedChannels.Length, 1) + (string.IsNullOrEmpty(seekDiagnostic) ? 0 : 1);
+                }
+            }
+
+            int totalRows = (showAudioMeters ? 2 : 0) + (showOrganPanel ? 5 : 0) + staffRows;
+            if (EnsureRows(_contentStartRow + totalRows))
             {
                 RenderDashboard();
             }
@@ -640,141 +688,121 @@ namespace PS150.UI.Windows
             _grid.SetCursorPosition(0, _contentStartRow);
 
             const int barWidth = 14;
-            string barL = AudioMeter.RenderBar(_leftDb, barWidth);
-            string barR = AudioMeter.RenderBar(_rightDb, barWidth);
 
-            _grid.Write(" L:[");
-            _grid.ForegroundColor = ConsoleColor.Green;
-            _grid.Write(barL);
-            _grid.ResetColor();
-            _grid.WriteLine(FitWidth($"]{_leftDb,5:F1}dB", Cols - 4 - barWidth));
-
-            _grid.Write(" R:[");
-            _grid.ForegroundColor = ConsoleColor.Green;
-            _grid.Write(barR);
-            _grid.ResetColor();
-            _grid.WriteLine(FitWidth($"]{_rightDb,5:F1}dB", Cols - 4 - barWidth));
-
-            string barBass = AudioMeter.RenderBar(_bassDb, barWidth);
-            string barMid = AudioMeter.RenderBar(_midDb, barWidth);
-            string barTreble = AudioMeter.RenderBar(_trebleDb, barWidth);
-
-            _grid.Write(" H:[");
-            _grid.ForegroundColor = ConsoleColor.Cyan;
-            _grid.Write(barBass);
-            _grid.ResetColor();
-            _grid.WriteLine(FitWidth($"]{_bassDb,5:F1}dB", Cols - 4 - barWidth));
-
-            _grid.Write(" S:[");
-            _grid.ForegroundColor = ConsoleColor.Cyan;
-            _grid.Write(barMid);
-            _grid.ResetColor();
-            _grid.WriteLine(FitWidth($"]{_midDb,5:F1}dB", Cols - 4 - barWidth));
-
-            _grid.Write(" V:[");
-            _grid.ForegroundColor = ConsoleColor.Cyan;
-            _grid.Write(barTreble);
-            _grid.ResetColor();
-            _grid.WriteLine(FitWidth($"]{_trebleDb,5:F1}dB", Cols - 4 - barWidth));
-
-            _grid.Write(" Reg:[");
-            _grid.ForegroundColor = ConsoleColor.Red;
-            _grid.Write(_registerInputBuffer.ToString().PadRight(3));
-            _grid.ResetColor();
-            _grid.WriteLine(FitWidth("] Ent/Esc/Bksp", Cols - 6 - 3));
-
-            _grid.Write(" Akt: ");
-            var active = App.OrganEngine?.ActiveRegisters;
-            if (active != null && active.Count > 0)
+            if (showAudioMeters)
             {
+                string barL = AudioMeter.RenderBar(_leftDb, barWidth);
+                _grid.Write(" L:[");
                 _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.WriteLine(FitWidth(string.Join(",", active), Cols - 6));
+                _grid.Write(barL);
                 _grid.ResetColor();
-            }
-            else
-            {
-                _grid.WriteLine(FitWidth("(žádný)", Cols - 6));
-            }
-        }
+                _grid.WriteLine(FitWidth($"]{_leftDb,5:F1}dB", Cols - 4 - barWidth));
 
-        private void RenderMidiStaffOnly()
-        {
-            int[] usedChannels;
-            (int Channel, int Note, double BendCents)[] activeNotesSnapshot;
-            string? errorMessage;
-            lock (_midiNotesLock)
-            {
-                usedChannels = _midiUsedChannels;
-                activeNotesSnapshot = _midiActiveNotes
-                    .Select(kv => (Channel: kv.Key.Channel, Note: kv.Key.Note, BendCents: kv.Value))
-                    .ToArray();
-                errorMessage = _midiErrorMessage;
+                string barR = AudioMeter.RenderBar(_rightDb, barWidth);
+                _grid.Write(" R:[");
+                _grid.ForegroundColor = ConsoleColor.Green;
+                _grid.Write(barR);
+                _grid.ResetColor();
+                _grid.WriteLine(FitWidth($"]{_rightDb,5:F1}dB", Cols - 4 - barWidth));
             }
 
-            if (errorMessage != null)
+            if (showOrganPanel)
             {
-                var errorLines = WrapPath(errorMessage, Cols - 1);
-                if (EnsureRows(_contentStartRow + 1 + errorLines.Count))
-                {
-                    RenderDashboard();
-                }
+                string barBass = AudioMeter.RenderBar(_bassDb, barWidth);
+                string barMid = AudioMeter.RenderBar(_midDb, barWidth);
+                string barTreble = AudioMeter.RenderBar(_trebleDb, barWidth);
 
-                _grid.SetCursorPosition(0, _contentStartRow);
+                _grid.Write(" H:[");
+                _grid.ForegroundColor = ConsoleColor.Cyan;
+                _grid.Write(barBass);
+                _grid.ResetColor();
+                _grid.WriteLine(FitWidth($"]{_bassDb,5:F1}dB", Cols - 4 - barWidth));
+
+                _grid.Write(" S:[");
+                _grid.ForegroundColor = ConsoleColor.Cyan;
+                _grid.Write(barMid);
+                _grid.ResetColor();
+                _grid.WriteLine(FitWidth($"]{_midDb,5:F1}dB", Cols - 4 - barWidth));
+
+                _grid.Write(" V:[");
+                _grid.ForegroundColor = ConsoleColor.Cyan;
+                _grid.Write(barTreble);
+                _grid.ResetColor();
+                _grid.WriteLine(FitWidth($"]{_trebleDb,5:F1}dB", Cols - 4 - barWidth));
+
+                _grid.Write(" Reg:[");
                 _grid.ForegroundColor = ConsoleColor.Red;
-                _grid.WriteLine(FitWidth(" CHYBA přehrávání:", Cols));
-                foreach (string line in errorLines)
+                _grid.Write(_registerInputBuffer.ToString().PadRight(3));
+                _grid.ResetColor();
+                _grid.WriteLine(FitWidth("] Ent/Esc/Bksp", Cols - 6 - 3));
+
+                _grid.Write(" Akt: ");
+                var active = App.OrganEngine?.ActiveRegisters;
+                if (active != null && active.Count > 0)
                 {
-                    _grid.WriteLine(FitWidth($" {line}", Cols));
+                    _grid.ForegroundColor = ConsoleColor.Green;
+                    _grid.WriteLine(FitWidth(string.Join(",", active), Cols - 6));
+                    _grid.ResetColor();
                 }
-                _grid.ResetColor();
-                return;
+                else
+                {
+                    _grid.WriteLine(FitWidth("(žádný)", Cols - 6));
+                }
             }
 
-            string? seekDiagnostic = _midiPlayer.LastSeekDiagnostic;
-            int contentRows = Math.Max(usedChannels.Length, 1) + (string.IsNullOrEmpty(seekDiagnostic) ? 0 : 1);
-            if (EnsureRows(_contentStartRow + contentRows))
+            if (_isMidiMode)
             {
-                RenderDashboard();
-            }
+                if (errorMessage != null)
+                {
+                    _grid.ForegroundColor = ConsoleColor.Red;
+                    _grid.WriteLine(FitWidth(" CHYBA přehrávání:", Cols));
+                    foreach (string line in errorLines!)
+                    {
+                        _grid.WriteLine(FitWidth($" {line}", Cols));
+                    }
+                    _grid.ResetColor();
+                }
+                else
+                {
+                    var notesByChannel = activeNotesSnapshot
+                        .GroupBy(n => n.Channel)
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.OrderBy(n => n.Note).ToArray());
 
-            _grid.SetCursorPosition(0, _contentStartRow);
+                    foreach (int channel in usedChannels)
+                    {
+                        string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
+                        bool isDrumChannel = channel == 9;
+                        string notes = notesByChannel.TryGetValue(channel, out var noteEntries)
+                            ? string.Join(" ", noteEntries.Select(n => isDrumChannel
+                                ? DrumAbbreviation(n.Note)
+                                : NoteNumberToName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
+                            : "";
 
-            var notesByChannel = activeNotesSnapshot
-                .GroupBy(n => n.Channel)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.OrderBy(n => n.Note).ToArray());
+                        string label = $" {channelLabel}:";
+                        _grid.ForegroundColor = ConsoleColor.White;
+                        _grid.Write(label);
+                        _grid.ForegroundColor = ConsoleColor.Green;
+                        _grid.WriteLine(FitWidth(notes, Cols - label.Length));
+                        _grid.ResetColor();
+                    }
 
-            foreach (int channel in usedChannels)
-            {
-                string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
-                bool isDrumChannel = channel == 9;
-                string notes = notesByChannel.TryGetValue(channel, out var noteEntries)
-                    ? string.Join(" ", noteEntries.Select(n => isDrumChannel
-                        ? DrumAbbreviation(n.Note)
-                        : NoteNumberToName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
-                    : "";
+                    if (usedChannels.Length == 0)
+                    {
+                        _grid.WriteLine(FitWidth(" (osnovy zatím nerozpoznané)", Cols));
+                    }
 
-                string label = $" {channelLabel}:";
-                _grid.ForegroundColor = ConsoleColor.White;
-                _grid.Write(label);
-                _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.WriteLine(FitWidth(notes, Cols - label.Length));
-                _grid.ResetColor();
-            }
-
-            if (usedChannels.Length == 0)
-            {
-                _grid.WriteLine(FitWidth(" (osnovy zatím nerozpoznané)", Cols));
-            }
-
-            if (!string.IsNullOrEmpty(seekDiagnostic))
-            {
-                _grid.ForegroundColor = ConsoleColor.Yellow;
-                _grid.WriteLine(FitWidth($" [Seek] {seekDiagnostic}", Cols));
-                _grid.ResetColor();
+                    if (!string.IsNullOrEmpty(seekDiagnostic))
+                    {
+                        _grid.ForegroundColor = ConsoleColor.Yellow;
+                        _grid.WriteLine(FitWidth($" [Seek] {seekDiagnostic}", Cols));
+                        _grid.ResetColor();
+                    }
+                }
             }
         }
+
 
         // Přirozené tóny (bez křížku/béčka) a jejich výška v centech od C
         // v rámci jedné oktávy - jediná tabulka pro všechno (běžné
