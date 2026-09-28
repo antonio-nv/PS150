@@ -496,42 +496,6 @@ namespace PS150.UI.Windows
             return true;
         }
 
-        private static List<string> WrapPath(string text, int width)
-        {
-            var lines = new List<string>();
-            int pos = 0;
-            while (pos < text.Length)
-            {
-                int remaining = text.Length - pos;
-                if (remaining <= width)
-                {
-                    lines.Add(text.Substring(pos));
-                    break;
-                }
-
-                int breakAt = text.LastIndexOf('\\', pos + width - 1, width);
-                if (breakAt <= pos)
-                {
-                    breakAt = pos + width - 1;
-                }
-                else
-                {
-                    breakAt++;
-                }
-
-                lines.Add(text.Substring(pos, breakAt - pos));
-                pos = breakAt;
-            }
-            if (lines.Count == 0) lines.Add("");
-            return lines;
-        }
-
-        private static string FitWidth(string text, int width)
-        {
-            if (width <= 0) return "";
-            if (text.Length <= width) return text.PadRight(width);
-            return width == 1 ? text.Substring(0, 1) : text.Substring(0, width - 1) + "…";
-        }
 
         private bool EnsureRows(int desiredRows)
         {
@@ -617,7 +581,7 @@ namespace PS150.UI.Windows
             _grid.ResetColor();
 
             // --- Cesta k souboru, zalomená na šířku okna ---
-            var pathLines = WrapPath(fullPath, Cols - 1);
+            var pathLines = TextLayout.WrapPath(fullPath, Cols - 1);
             foreach (string line in pathLines)
             {
                 _grid.WriteLine($" {line}".PadRight(Cols));
@@ -669,7 +633,7 @@ namespace PS150.UI.Windows
 
                 if (errorMessage != null)
                 {
-                    errorLines = WrapPath(errorMessage, Cols - 1);
+                    errorLines = TextLayout.WrapPath(errorMessage, Cols - 1);
                     staffRows = 1 + errorLines.Count;
                 }
                 else
@@ -696,14 +660,14 @@ namespace PS150.UI.Windows
                 _grid.ForegroundColor = ConsoleColor.Green;
                 _grid.Write(barL);
                 _grid.ResetColor();
-                _grid.WriteLine(FitWidth($"]{_leftDb,5:F1}dB", Cols - 4 - barWidth));
+                _grid.WriteLine(TextLayout.FitWidth($"]{_leftDb,5:F1}dB", Cols - 4 - barWidth));
 
                 string barR = AudioMeter.RenderBar(_rightDb, barWidth);
                 _grid.Write(" R:[");
                 _grid.ForegroundColor = ConsoleColor.Green;
                 _grid.Write(barR);
                 _grid.ResetColor();
-                _grid.WriteLine(FitWidth($"]{_rightDb,5:F1}dB", Cols - 4 - barWidth));
+                _grid.WriteLine(TextLayout.FitWidth($"]{_rightDb,5:F1}dB", Cols - 4 - barWidth));
             }
 
             if (showOrganPanel)
@@ -716,37 +680,37 @@ namespace PS150.UI.Windows
                 _grid.ForegroundColor = ConsoleColor.Cyan;
                 _grid.Write(barBass);
                 _grid.ResetColor();
-                _grid.WriteLine(FitWidth($"]{_bassDb,5:F1}dB", Cols - 4 - barWidth));
+                _grid.WriteLine(TextLayout.FitWidth($"]{_bassDb,5:F1}dB", Cols - 4 - barWidth));
 
                 _grid.Write(" S:[");
                 _grid.ForegroundColor = ConsoleColor.Cyan;
                 _grid.Write(barMid);
                 _grid.ResetColor();
-                _grid.WriteLine(FitWidth($"]{_midDb,5:F1}dB", Cols - 4 - barWidth));
+                _grid.WriteLine(TextLayout.FitWidth($"]{_midDb,5:F1}dB", Cols - 4 - barWidth));
 
                 _grid.Write(" V:[");
                 _grid.ForegroundColor = ConsoleColor.Cyan;
                 _grid.Write(barTreble);
                 _grid.ResetColor();
-                _grid.WriteLine(FitWidth($"]{_trebleDb,5:F1}dB", Cols - 4 - barWidth));
+                _grid.WriteLine(TextLayout.FitWidth($"]{_trebleDb,5:F1}dB", Cols - 4 - barWidth));
 
                 _grid.Write(" Reg:[");
                 _grid.ForegroundColor = ConsoleColor.Red;
                 _grid.Write(_registerInputBuffer.ToString().PadRight(3));
                 _grid.ResetColor();
-                _grid.WriteLine(FitWidth("] Ent/Esc/Bksp", Cols - 6 - 3));
+                _grid.WriteLine(TextLayout.FitWidth("] Ent/Esc/Bksp", Cols - 6 - 3));
 
                 _grid.Write(" Akt: ");
                 var active = App.OrganEngine?.ActiveRegisters;
                 if (active != null && active.Count > 0)
                 {
                     _grid.ForegroundColor = ConsoleColor.Green;
-                    _grid.WriteLine(FitWidth(string.Join(",", active), Cols - 6));
+                    _grid.WriteLine(TextLayout.FitWidth(string.Join(",", active), Cols - 6));
                     _grid.ResetColor();
                 }
                 else
                 {
-                    _grid.WriteLine(FitWidth("(žádný)", Cols - 6));
+                    _grid.WriteLine(TextLayout.FitWidth("(žádný)", Cols - 6));
                 }
             }
 
@@ -755,10 +719,10 @@ namespace PS150.UI.Windows
                 if (errorMessage != null)
                 {
                     _grid.ForegroundColor = ConsoleColor.Red;
-                    _grid.WriteLine(FitWidth(" CHYBA přehrávání:", Cols));
+                    _grid.WriteLine(TextLayout.FitWidth(" CHYBA přehrávání:", Cols));
                     foreach (string line in errorLines!)
                     {
-                        _grid.WriteLine(FitWidth($" {line}", Cols));
+                        _grid.WriteLine(TextLayout.FitWidth($" {line}", Cols));
                     }
                     _grid.ResetColor();
                 }
@@ -776,131 +740,32 @@ namespace PS150.UI.Windows
                         bool isDrumChannel = channel == 9;
                         string notes = notesByChannel.TryGetValue(channel, out var noteEntries)
                             ? string.Join(" ", noteEntries.Select(n => isDrumChannel
-                                ? DrumAbbreviation(n.Note)
-                                : NoteNumberToName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
+                                ? NoteDisplay.DrumAbbreviation(n.Note)
+                                : NoteDisplay.NoteName(n.Note, n.BendCents, _midiPlayer.KeyPrefersFlats)))
                             : "";
 
                         string label = $" {channelLabel}:";
                         _grid.ForegroundColor = ConsoleColor.White;
                         _grid.Write(label);
                         _grid.ForegroundColor = ConsoleColor.Green;
-                        _grid.WriteLine(FitWidth(notes, Cols - label.Length));
+                        _grid.WriteLine(TextLayout.FitWidth(notes, Cols - label.Length));
                         _grid.ResetColor();
                     }
 
                     if (usedChannels.Length == 0)
                     {
-                        _grid.WriteLine(FitWidth(" (osnovy zatím nerozpoznané)", Cols));
+                        _grid.WriteLine(TextLayout.FitWidth(" (osnovy zatím nerozpoznané)", Cols));
                     }
 
                     if (!string.IsNullOrEmpty(seekDiagnostic))
                     {
                         _grid.ForegroundColor = ConsoleColor.Yellow;
-                        _grid.WriteLine(FitWidth($" [Seek] {seekDiagnostic}", Cols));
+                        _grid.WriteLine(TextLayout.FitWidth($" [Seek] {seekDiagnostic}", Cols));
                         _grid.ResetColor();
                     }
                 }
             }
         }
 
-
-        // Přirozené tóny (bez křížku/béčka) a jejich výška v centech od C
-        // v rámci jedné oktávy - jediná tabulka pro všechno (běžné
-        // půltóny i čtvrttóny/tříčtvrttóny), viz NoteNumberToName níž.
-        private static readonly (char Letter, int Cents)[] Naturals =
-        {
-            ('C', 0), ('D', 200), ('E', 400), ('F', 500), ('G', 700), ('A', 900), ('B', 1100),
-        };
-
-        /// <summary>
-        /// Název noty vč. čtvrttónové/tříčtvrttónové odchylky. `bendCents`
-        /// je aktuální pitch bend kanálu v centech v okamžiku NoteOn (0 pro
-        /// běžné, nečtvrttónové soubory). Značka (¼/¾, #/b) se píše PŘED
-        /// písmenem, jak požadováno - např. "¼#C5", "¾bC5", "bG5".
-        ///
-        /// Na rozdíl od dřívější verze se písmeno NEODVOZUJE ze syrového
-        /// čísla MIDI noty (to by čtvrttóny/tříčtvrttóny vždycky ukázalo
-        /// jako křížek, nikdy jako béčko - viz historie v konverzaci) -
-        /// místo toho se hledá nejbližší přirozený tón (C/D/E/F/G/A/B) k
-        /// výsledné výšce (nota+ohyb dohromady). Když je přesně uprostřed
-        /// mezi dvěma sousedními přirozenými tóny (klasický případ černé
-        /// klávesy bez ohybu, ale stejně tak čtvrttón přesně "mezi" notami),
-        /// rozhoduje `preferFlats` (z tóniny souboru).
-        /// </summary>
-        /// <summary>
-        /// Zkratka GM bicího (kanál D10) podle čísla noty - stejná tabulka
-        /// jako u syntézy (_700_Drums.cs), takže se zobrazení nemůže
-        /// rozejít s tím, co skutečně hraje. Přehrávání .mid souborů tady
-        /// pořád jede přes GmPianoMidiPlayer (Windows GS Wavetable Synth),
-        /// ne přes DrumVoice - tahle tabulka se používá čistě pro název,
-        /// ne pro samotný zvuk.
-        /// </summary>
-        private static string DrumAbbreviation(int noteNumber)
-        {
-            foreach (var p in _700_Drums.Preset.DrumParameters)
-            {
-                if (p.GmNoteNumber == noteNumber) return p.Abbreviation;
-            }
-            return noteNumber.ToString(); // Neznámé číslo v tabulce - aspoň syrové číslo noty, ať je vidět, že něco hraje
-        }
-
-        private static string NoteNumberToName(int noteNumber, double bendCents, bool preferFlats)
-        {
-            double totalCents = noteNumber * 100.0 + bendCents;
-            double localBase = Math.Floor(totalCents / 1200.0) * 1200.0;
-
-            char bestLetter = 'C';
-            double bestCents = 0;
-            double bestDist = double.MaxValue;
-
-            for (int octaveShift = -1; octaveShift <= 1; octaveShift++)
-            {
-                double candidateBase = localBase + octaveShift * 1200.0;
-                foreach (var (letter, cents) in Naturals)
-                {
-                    double candidateCents = candidateBase + cents;
-                    double dist = Math.Abs(totalCents - candidateCents);
-
-                    bool strictlyBetter = dist < bestDist - 0.01;
-                    bool tied = Math.Abs(dist - bestDist) <= 0.01;
-                    bool preferThisOnTie = tied && PreferCandidate(totalCents, candidateCents, preferFlats);
-
-                    if (strictlyBetter || preferThisOnTie)
-                    {
-                        bestLetter = letter;
-                        bestCents = candidateCents;
-                        bestDist = dist;
-                    }
-                }
-            }
-
-            int quarterSteps = (int)Math.Round((totalCents - bestCents) / 50.0, MidpointRounding.AwayFromZero);
-            int octave = (int)Math.Floor(bestCents / 1200.0) - 1;
-
-            string accidental = quarterSteps switch
-            {
-                0 => "",
-                1 => "¼#",
-                2 => "#",
-                3 => "¾#",
-                -1 => "¼b",
-                -2 => "b",
-                -3 => "¾b",
-                // Extrémnější odchylky (nad tříčtvrttón) - v běžné hudbě se
-                // nestávají, a i kdyby, čtvrttónová hudba je stejně naprosto
-                // šílená, takže tady stačí cokoliv rozumně čitelného.
-                > 3 => $"{quarterSteps}q#",
-                _ => $"{-quarterSteps}qb",
-            };
-
-            return $"{accidental}{bestLetter}{octave}";
-        }
-
-        /// <summary>Při přesné shodě dvou stejně vzdálených přirozených tónů: preferFlats=true chce tón NAD (vyjde to jako béčko), jinak tón POD (vyjde to jako křížek).</summary>
-        private static bool PreferCandidate(double totalCents, double candidateCents, bool preferFlats)
-        {
-            bool candidateIsAbove = candidateCents > totalCents;
-            return preferFlats ? candidateIsAbove : !candidateIsAbove;
-        }
     }
 }
