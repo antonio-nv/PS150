@@ -5,19 +5,17 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <!-- linux-x64 kvůli Umax VisionBooku (Intel Celeron, běžné x86-64) -->
-    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\PS150.Core\PS150.Core.csproj" />
+    <!-- Na Linuxu se NEPŘIDÁVÁ VideoLAN.LibVLC.Linux ani nic podobného -
+         libvlc se bere ze systémového balíčku (apt install vlc), stejně
+         jako v ověřeném PS150-LinuxFullscreenTest. -->
+    <PackageReference Include="LibVLCSharp" Version="3.9.1" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- POZOR: na rozdíl od Windows tu NENÍ balíček s LibVLC samotným
-         (žádná obdoba VideoLAN.LibVLC.Windows pro Linux neexistuje) -
-         libvlc se musí nainstalovat přes apt, viz komentář v Program.cs. -->
-    <PackageReference Include="LibVLCSharp" Version="3.10.1" />
+    <ProjectReference Include="..\PS150.Core\PS150.Core.csproj" />
   </ItemGroup>
 
 </Project>

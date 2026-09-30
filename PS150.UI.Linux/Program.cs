@@ -1,77 +1,49 @@
-﻿using LibVLCSharp.Shared;
-using PS150.Core;
+﻿// PS150.UI.Linux - vstupní bod. Stejný vzor jako MediaLauncher.Launch v
+// PS150.UI.Windows/App.xaml.cs: podle typu souboru se spustí buď
+// VideoWindow (fullscreen), nebo AudioTextPlayer (terminál); jakmile
+// jeden z nich nastaví HandoffFile, přepne se appka na druhý, dokud
+// nedojdou soubory nebo uživatel neukončí (Esc/q).
 
-// Vynutit UTF-8 na výstupu - viz minulá konverzace o háčcích/čárkách.
-Console.OutputEncoding = System.Text.Encoding.UTF8;
+using System;
+using System.IO;
+using PS150.Core;
+using PS150.UI.Linux;
 
 if (args.Length == 0)
 {
-    Console.WriteLine("Použití: PS150.UI.Linux <cesta k souboru>");
-    return;
+    Console.WriteLine("Použití: dotnet run -- /cesta/k/souboru (mp3/wav/flac/mp4/avi/mkv...)");
+    return 1;
 }
 
-string filePath = args[0];
+string? currentFile = args[0];
 
-if (!File.Exists(filePath))
+if (!File.Exists(currentFile))
 {
-    Console.WriteLine($"Soubor nenalezen: {filePath}");
-    return;
+    Console.WriteLine($"Soubor neexistuje: {currentFile}");
+    return 1;
 }
 
 var navigator = new DirectoryNavigator();
-navigator.LoadDirectory(filePath);
+navigator.LoadDirectory(currentFile);
 
-string? currentFile = navigator.CurrentFile;
-if (currentFile == null)
+while (currentFile != null)
 {
-    Console.WriteLine("Soubor se nepodařilo zařadit do playlistu.");
-    return;
-}
-
-Console.WriteLine($"Aktuální soubor: {currentFile}");
-
-// --- Přehrávání přes LibVLC ---
-// POZOR: na Linuxu musí být libvlc nainstalované v systému přes apt
-// (na rozdíl od Windows, kde to obstará NuGet balíček
-// VideoLAN.LibVLC.Windows). Pokud tenhle řádek spadne s chybou o
-// nenalezené knihovně, běž v terminálu:
-//   sudo apt update && sudo apt install vlc
-// (samotný balíček "vlc" s sebou přinese i libvlc jako závislost).
-LibVLCSharp.Shared.Core.Initialize();
-
-using var libVLC = new LibVLC();
-using var mediaPlayer = new MediaPlayer(libVLC);
-
-bool finished = false;
-mediaPlayer.EndReached += (s, e) => finished = true;
-
-using (var media = new Media(libVLC, new Uri(currentFile)))
-{
-    mediaPlayer.Play(media);
-}
-
-Console.WriteLine("Přehrávám... (Enter = zastavit)");
-
-// Play() je asynchronní (vrátí se hned) - vlastní vlákno na Enter, ať
-// hlavní smyčka může mezitím dál vypisovat postup.
-bool stopRequested = false;
-var inputThread = new Thread(() =>
-{
-    Console.ReadLine();
-    stopRequested = true;
-});
-inputThread.IsBackground = true;
-inputThread.Start();
-
-while (!finished && !stopRequested)
-{
-    TimeSpan current = TimeSpan.FromMilliseconds(Math.Max(mediaPlayer.Time, 0));
-    TimeSpan total = TimeSpan.FromMilliseconds(Math.Max(mediaPlayer.Length, 0));
-    Console.Write($"\r{current:mm\\:ss} / {total:mm\\:ss}   ");
-    Thread.Sleep(500);
+    if (MediaKind.IsVideo(currentFile))
+    {
+        using var video = new VideoWindow(navigator);
+        video.Run(currentFile);
+        currentFile = video.HandoffFile;
+        if (video.QuitRequested) break;
+    }
+    else
+    {
+        using var audio = new AudioTextPlayer(navigator);
+        audio.Run(currentFile);
+        currentFile = audio.HandoffFile;
+        if (audio.QuitRequested) break;
+    }
 }
 
 Console.WriteLine();
-Console.WriteLine(finished ? "Skladba dohrála." : "Zastaveno uživatelem.");
-
-mediaPlayer.Stop();
+Console.WriteLine("[PS150] Konec.");
+return 0;
