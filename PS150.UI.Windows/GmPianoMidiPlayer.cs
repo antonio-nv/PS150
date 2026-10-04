@@ -102,6 +102,13 @@ namespace PS150.UI.Windows
         private const int PanCenter = 64;
         private const int PanRight = 127;
 
+        private const int VolumeLsbControlNumber = 39;       // CC39 = Channel Volume (jemná část)
+        private const int ResetAllControllersNumber = 121;   // CC121 = Reset All Controllers
+
+        // Kanály použité v právě přehrávaném souboru - pro obnovu ping-pong
+        // panorámy po resetu ze souboru (viz ReassertChannelState).
+        private volatile int[] _usedChannelsForPan = Array.Empty<int>();
+
         private OutputDevice? _outputDevice;
         private CancellationTokenSource? _cts;
         private Task? _playbackTask;
@@ -254,17 +261,8 @@ namespace PS150.UI.Windows
             // čísla kanálu. Pan eventy ze souboru samotného níž v EventPlayed
             // zahazujeme, ať nám tohle rozložení později v playbacku nikdo
             // nepřepíše.
-            if (usedChannels.Length == 1)
-            {
-                SendPan(usedChannels[0], PanCenter);
-            }
-            else if (usedChannels.Length > 1)
-            {
-                for (int i = 0; i < usedChannels.Length; i++)
-                {
-                    SendPan(usedChannels[i], (i % 2 == 0) ? PanLeft : PanRight);
-                }
-            }
+            _usedChannelsForPan = usedChannels;
+            ApplyPanLayout();
 
             _playbackTask = Task.Run(() =>
             {
@@ -298,6 +296,28 @@ namespace PS150.UI.Windows
                                 // "Počáteční hlasitost..."). Zvuková dynamika
                                 // jednotlivých not (velocity) tímhle není dotčená -
                                 // řeší jen kanálovou/celkovou hlasitost.
+                                break;
+
+                            case SysExEvent:
+                                // SysEx ze souboru (GM System On, GS Reset, XG System On...)
+                                // posíláme dál beze změny - ovlivňuje zvuk (efekty, bicí),
+                                // ale SOUČASNĚ vrací hlasitost (CC7 = 100) a panorámu všech
+                                // kanálů na výchozí hodnoty. Bez následné obnovy by pak
+                                // skladba hrála hlasitěji, než je nastaveno šipkami, a to
+                                // až do prvního stisku šipky (SetVolume pošle CC7 znovu).
+                                _outputDevice.SendEvent(e.Event);
+                                ReassertChannelState();
+                                break;
+
+                            case ControlChangeEvent resetCc when resetCc.ControlNumber == ResetAllControllersNumber:
+                                // CC121 "Reset All Controllers" - stejný důvod jako u SysEx výš.
+                                _outputDevice.SendEvent(resetCc);
+                                ReassertChannelState();
+                                break;
+
+                            case ControlChangeEvent volLsbCc when volLsbCc.ControlNumber == VolumeLsbControlNumber:
+                                // CC39 = jemná část hlasitosti (LSB) kanálu - ignorujeme
+                                // ze stejného důvodu jako CC7 výš.
                                 break;
 
                             case PitchBendEvent pitchBend:
@@ -416,6 +436,11 @@ namespace PS150.UI.Windows
                     playback.MoveBack(new MetricTimeSpan(TimeSpan.FromSeconds(-deltaSeconds)));
                 }
 
+                // Po skoku v čase může Playback přehrát zpět stavové události
+                // (kontrolery) z přeskočeného úseku - hlasitost a panorámu
+                // proto pro jistotu nastavíme znovu.
+                ReassertChannelState();
+
                 LastSeekDiagnostic = null;
             }
             catch (Exception ex)
@@ -451,18 +476,55 @@ namespace PS150.UI.Windows
         public void SetVolume(int volumePercent)
         {
             _masterVolumePercent = Math.Clamp(volumePercent, 0, 100);
+            SendVolumeToAllChannels();
+        }
 
-            if (_outputDevice == null) return;
+        private void SendVolumeToAllChannels()
+        {
+            var device = _outputDevice;
+            if (device == null) return;
 
             int midiVolume = ScaleToMidiVolume(127);
             for (int channel = 0; channel <= 15; channel++)
             {
-                _outputDevice.SendEvent(new ControlChangeEvent(
+                device.SendEvent(new ControlChangeEvent(
                     (SevenBitNumber)VolumeControlNumber, (SevenBitNumber)midiVolume)
                 {
                     Channel = (FourBitNumber)channel
                 });
             }
+        }
+
+        /// <summary>
+        /// Ping-pong panoráma mezi použitými osnovami: je-li osnova jen jedna,
+        /// zůstane na středu; je-li jich víc, střídají se vlevo/vpravo podle
+        /// pořadí čísla kanálu.
+        /// </summary>
+        private void ApplyPanLayout()
+        {
+            var channels = _usedChannelsForPan;
+            if (channels.Length == 1)
+            {
+                SendPan(channels[0], PanCenter);
+            }
+            else if (channels.Length > 1)
+            {
+                for (int i = 0; i < channels.Length; i++)
+                {
+                    SendPan(channels[i], (i % 2 == 0) ? PanLeft : PanRight);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Znovu nastaví hlasitost (hlavní hlasitost ze šipek) a panorámu všech
+        /// kanálů. Volá se po všem, co je mohlo vrátit na výchozí hodnoty:
+        /// SysEx reset ze souboru, CC121 a převinutí (Seek).
+        /// </summary>
+        private void ReassertChannelState()
+        {
+            SendVolumeToAllChannels();
+            ApplyPanLayout();
         }
 
         private int ScaleToMidiVolume(int originalValue0To127)

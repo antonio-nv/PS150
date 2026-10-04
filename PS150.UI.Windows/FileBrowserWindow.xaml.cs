@@ -380,6 +380,11 @@ namespace PS150.UI.Windows
 
                 if (File.Exists(currentFile))
                 {
+                    // Hlasitost se musí nastavit i PŘED PlayAsync: nový přehrávač
+                    // má výchozích 100 % a PlayAsync z něj při startu rozešle
+                    // hlasitost všem kanálům - první noty by tak mohly zaznít
+                    // naplno, než dojde na SetVolume níž.
+                    _midiPlayer.SetVolume(_volume);
                     _ = _midiPlayer.PlayAsync(currentFile);
                     _midiPlayer.SetVolume(_volume);
                     _midiPlayer.SetDrumsEnabled(_settings.DrumsEnabled);
