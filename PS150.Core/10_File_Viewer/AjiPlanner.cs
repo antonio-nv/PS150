@@ -214,7 +214,7 @@ namespace PS150.Core
         // ---------------------- NASTAVENÍ (natvrdo) ----------------------
 
         /// <summary>Které ladění se použije. Zkuste JustIntonation5Limit, QuarterCommaMeantone (barokní) nebo Pythagorean (starověké).</summary>
-        public const AjiTemperament ChosenTemperament = AjiTemperament.JustIntonation5Limit;
+        public const AjiTemperament ChosenTemperament = AjiTemperament.Pythagorean;
 
         /// <summary>Délka okna pro určení tóniny (sekundy). Delší = stabilnější, ale pomalejší na modulace.</summary>
         public const double WindowSeconds = 8.0;
