@@ -25,6 +25,7 @@ namespace PS150.Core.Output
         private const int SND_PCM_STREAM_PLAYBACK = 0;
         private const int SND_PCM_ACCESS_RW_INTERLEAVED = 3;
         private const int SND_PCM_FORMAT_S16_LE = 2;
+        private const int SND_PCM_FORMAT_S32_LE = 10;
         private const int SND_PCM_FORMAT_FLOAT_LE = 14;
         private const int EPIPE = 32;   // underrun (buffer došel) - po recover se pokračuje
 
@@ -40,6 +41,9 @@ namespace PS150.Core.Output
         [DllImport(Lib, EntryPoint = "snd_pcm_writei")]
         private static extern nint snd_pcm_writei_short(IntPtr pcm, ref short buffer, nuint frames);
 
+        [DllImport(Lib, EntryPoint = "snd_pcm_writei")]
+        private static extern nint snd_pcm_writei_int(IntPtr pcm, ref int buffer, nuint frames);
+
         [DllImport(Lib)]
         private static extern int snd_pcm_recover(IntPtr pcm, int err, int silent);
 
@@ -54,16 +58,25 @@ namespace PS150.Core.Output
 
         // ---- stav ----
         private IntPtr _pcm = IntPtr.Zero;
-        private readonly bool _useFloat;
+        private readonly int _format;
         private short[] _shortBuffer = Array.Empty<short>();
+        private int[] _intBuffer = Array.Empty<int>();
 
         public string DeviceName { get; }
         public int SampleRate { get; }
         public int Channels { get; }
         public int LatencyMs { get; }
 
-        /// <summary>True = karta přijímá 32bitový float přímo, false = převádíme na 16 bitů.</summary>
-        public bool UsesFloat => _useFloat;
+        /// <summary>True = karta přijímá 32bitový float přímo (bez převodu).</summary>
+        public bool UsesFloat => _format == SND_PCM_FORMAT_FLOAT_LE;
+
+        /// <summary>Formát, ve kterém se zapisuje do karty: "float 32", "int 32" nebo "int 16".</summary>
+        public string FormatName => _format switch
+        {
+            SND_PCM_FORMAT_FLOAT_LE => "float 32",
+            SND_PCM_FORMAT_S32_LE => "int 32",
+            _ => "int 16"
+        };
 
         /// <summary>Kolikrát od otevření došel buffer (přerušení zvuku). U zdravého systému zůstává 0.</summary>
         public int UnderrunCount { get; private set; }
@@ -82,25 +95,25 @@ namespace PS150.Core.Output
             SampleRate = sampleRate;
             LatencyMs = latencyMs;
 
-            // Nejdřív zkusíme float (bez ztráty kvality), když ho zařízení nebere,
-            // spadneme na 16 bitů. Po neúspěšném nastavení se zařízení raději
-            // zavře a otevře znovu, ať v něm nezůstane napůl nastavený stav.
-            string firstError;
-            if (TryOpen(SND_PCM_FORMAT_FLOAT_LE, out firstError))
-            {
-                _useFloat = true;
-                return;
-            }
+            // Formáty zkoušíme od nejlepšího: float (bez ztráty), pak 32 bitů, pak 16 bitů.
+            // Po neúspěšném nastavení se zařízení zavře a otevře znovu, ať v něm
+            // nezůstane napůl nastavený stav.
+            int[] formats = { SND_PCM_FORMAT_FLOAT_LE, SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_S16_LE };
+            var errors = new System.Collections.Generic.List<string>();
 
-            if (TryOpen(SND_PCM_FORMAT_S16_LE, out string secondError))
+            foreach (int format in formats)
             {
-                _useFloat = false;
-                return;
+                if (TryOpen(format, out string error))
+                {
+                    _format = format;
+                    return;
+                }
+                errors.Add(error);
             }
 
             throw new InvalidOperationException(
                 $"ALSA: zařízení '{deviceName}' se nepodařilo otevřít ({channels} kanálů, {sampleRate} Hz). " +
-                $"Float: {firstError}; 16 bitů: {secondError}");
+                string.Join("; ", errors));
         }
 
         private bool TryOpen(int format, out string error)
@@ -137,9 +150,23 @@ namespace PS150.Core.Output
             int frames = interleaved.Length / Channels;
             if (frames == 0) return;
 
-            if (_useFloat)
+            if (_format == SND_PCM_FORMAT_FLOAT_LE)
             {
                 WriteFloat(interleaved, frames);
+            }
+            else if (_format == SND_PCM_FORMAT_S32_LE)
+            {
+                if (_intBuffer.Length < frames * Channels)
+                    _intBuffer = new int[frames * Channels];
+
+                for (int i = 0; i < frames * Channels; i++)
+                {
+                    float v = interleaved[i];
+                    if (v > 1f) v = 1f; else if (v < -1f) v = -1f;
+                    _intBuffer[i] = (int)(v * 2147483520f);   // největší float pod 2^31, ať nepřeteče
+                }
+
+                WriteInt(frames);
             }
             else
             {
@@ -167,6 +194,28 @@ namespace PS150.Core.Output
                 ReadOnlySpan<float> slice = samples.Slice(done * Channels);
                 nint written = snd_pcm_writei_float(
                     _pcm, ref Unsafe.AsRef(in MemoryMarshal.GetReference(slice)), (nuint)(frames - done));
+
+                if (written < 0)
+                {
+                    Recover((int)written, ref failures);
+                    continue;
+                }
+
+                failures = 0;
+                done += (int)written;
+            }
+        }
+
+        private void WriteInt(int frames)
+        {
+            int done = 0;
+            int failures = 0;
+
+            while (done < frames)
+            {
+                Span<int> slice = _intBuffer.AsSpan(done * Channels, (frames - done) * Channels);
+                nint written = snd_pcm_writei_int(
+                    _pcm, ref MemoryMarshal.GetReference(slice), (nuint)(frames - done));
 
                 if (written < 0)
                 {
