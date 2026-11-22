@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -90,6 +91,47 @@ namespace PS150.UI.Windows
         // (tříčtvrttón) = 6144 z plného rozsahu ±8192.
         private const double PitchBendRangeCents = 200.0;
         private readonly double[] _channelBendCents = new double[16];
+
+        // ------------------------------------------------------------------
+        // NOVÉ: ladění / transpozice (klávesa t ve FileBrowserWindow).
+        //
+        // Jak se ladění dělá u MIDI přes Windows syntezátor (ten umí ladit
+        // jedině přes pitch bend celého kanálu, ne po jednotlivých notách):
+        //  - CELÉ půltóny (PlayerTuning.WholeSemitones) posunou číslo noty
+        //    ve zprávách NoteOn/NoteOff,
+        //  - zbytek v centech (PlayerTuning.RemainderCents, vždy -50..+50)
+        //    se přičte k pitch bendu kanálu. Bend ze souboru (např. čtvrttóny
+        //    ve skladbě) se tím nepřepíše, jen se k němu přičítá.
+        //  - bicí (kanál D10) se neladí vůbec - bicí nástroje nemají výšku.
+        //
+        // PlayerTuning je z PS150.Core, ale je to jen malá neutrální
+        // pomůcka s čísly - žádný syntezátor ani ToneEngine, takže původní
+        // oddělení od Core (viz komentář třídy výše) zůstává zachované.
+        //
+        // PlayerTuning je neměnná (immutable) třída, proto stačí "volatile"
+        // odkaz: UI vlákno vymění celý objekt, přehrávací vlákno si vždy
+        // přečte jeden konzistentní.
+        // ------------------------------------------------------------------
+        private volatile PS150.Core.PlayerTuning _tuning = PS150.Core.PlayerTuning.Off;
+
+        // (kanál, ČÍSLO NOTY ZE SOUBORU) -> číslo noty, které jsme skutečně
+        // poslali syntezátoru. Je to nutné, protože ladění se může změnit
+        // zrovna, když nota ještě zní: NoteOff pak musí jít na TU SAMOU
+        // (posunutou) notu jako NoteOn, jinak by nota zůstala viset.
+        // Používá se jen z přehrávacího vlákna.
+        private readonly Dictionary<(int Channel, int Note), int> _sentNotes = new();
+
+        /// <summary>
+        /// Nastaví ladění a hned ho promítne do pitch bendu všech kanálů.
+        /// Noty, které už znějí, si nechají původní číslo noty (jen se jim
+        /// plynule změní jemné doladění), nové noty už vzniknou s novým
+        /// laděním. Lze volat kdykoliv, i když nic nehraje.
+        /// </summary>
+        public void SetTuning(PS150.Core.PlayerTuning tuning)
+        {
+            _tuning = tuning ?? PS150.Core.PlayerTuning.Off;
+            SendTuningBendToAllChannels();
+        }
 
         /// <summary>
         /// True, pokud tónina souboru (viz KeySignatureEvent) preferuje
@@ -264,6 +306,14 @@ namespace PS150.UI.Windows
             _usedChannelsForPan = usedChannels;
             ApplyPanLayout();
 
+            // NOVÉ: ladění. Pitch bend se zde počítá z rozsahu ±2 půltóny,
+            // proto ho nejdřív výslovně nastavíme na všech kanálech (RPN 0,0),
+            // pak zapomeneme noty z předchozího souboru a pošleme každému
+            // kanálu výchozí bend včetně jemného doladění z klávesy t.
+            SetPitchBendRangeOnAllChannels();
+            _sentNotes.Clear();
+            SendTuningBendToAllChannels();
+
             _playbackTask = Task.Run(() =>
             {
                 try
@@ -306,12 +356,18 @@ namespace PS150.UI.Windows
                                 // skladba hrála hlasitěji, než je nastaveno šipkami, a to
                                 // až do prvního stisku šipky (SetVolume pošle CC7 znovu).
                                 _outputDevice.SendEvent(e.Event);
+                                // NOVÉ: reset ze souboru vrací i pitch bend na střed,
+                                // proto zapomeneme bend ze souboru (ReassertChannelState
+                                // níž pak pošle jen jemné doladění z ladění).
+                                Array.Clear(_channelBendCents, 0, _channelBendCents.Length);
                                 ReassertChannelState();
                                 break;
 
                             case ControlChangeEvent resetCc when resetCc.ControlNumber == ResetAllControllersNumber:
                                 // CC121 "Reset All Controllers" - stejný důvod jako u SysEx výš.
                                 _outputDevice.SendEvent(resetCc);
+                                // NOVÉ: CC121 vrací na střed i pitch bend (jen tohoto kanálu).
+                                _channelBendCents[resetCc.Channel] = 0.0;
                                 ReassertChannelState();
                                 break;
 
@@ -329,18 +385,28 @@ namespace PS150.UI.Windows
                                 // stejně jako dřív přes "default" větev.
                                 _channelBendCents[pitchBend.Channel] =
                                     (pitchBend.PitchValue - 8192) / 8192.0 * PitchBendRangeCents;
-                                _outputDevice.SendEvent(pitchBend);
+
+                                // ZMĚNA: bend ze souboru se zapamatuje (viz výše) a na
+                                // syntezátor se pošle SPOLU s jemným doladěním z klávesy t
+                                // (SendBend je spočítá dohromady). Bicí (D10) se neladí,
+                                // těm jde bend ze souboru beze změny.
+                                if (pitchBend.Channel == PercussionChannel)
+                                    _outputDevice.SendEvent(pitchBend);
+                                else
+                                    SendBend(pitchBend.Channel);
                                 break;
 
                             case NoteOnEvent noteOn:
                                 if (noteOn.Channel == PercussionChannel && !_drumsEnabled) break;
-                                _outputDevice.SendEvent(noteOn);
+                                SendTunedNoteOn(noteOn);
+                                // Zobrazení dostává ORIGINÁLNÍ notu ze souboru (notová
+                                // osnova se tím nemění, ladění ukazuje samostatný řádek).
                                 NoteOnRaised?.Invoke(noteOn.Channel, noteOn.NoteNumber, _channelBendCents[noteOn.Channel]);
                                 break;
 
                             case NoteOffEvent noteOff:
                                 if (noteOff.Channel == PercussionChannel && !_drumsEnabled) break;
-                                _outputDevice.SendEvent(noteOff);
+                                SendTunedNoteOff(noteOff);
                                 NoteOffRaised?.Invoke(noteOff.Channel, noteOff.NoteNumber);
                                 break;
 
@@ -525,6 +591,168 @@ namespace PS150.UI.Windows
         {
             SendVolumeToAllChannels();
             ApplyPanLayout();
+            SendTuningBendToAllChannels();   // NOVÉ: i jemné doladění se po resetu obnoví
+        }
+
+        // ------------------------------------------------------------------
+        // NOVÉ: ladění - pomocné metody (viz komentář u pole _tuning výše)
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Poskládá hodnotu pitch bendu (0-16383, střed 8192) z bendu ze
+        /// souboru a jemného doladění z ladění, obojí v centech. Výsledek se
+        /// ořízne do rozsahu ±200 centů (limit ±2 půltóny), takže při
+        /// extrémním bendu v souboru se doladění může částečně "ztratit" -
+        /// lepší než přetečení čísla.
+        /// </summary>
+        private static ushort ComposeBendValue(double fileBendCents, double tuningCents)
+        {
+            double total = fileBendCents + tuningCents;
+            double value = 8192.0 + total / PitchBendRangeCents * 8192.0;
+            return (ushort)Math.Clamp((int)Math.Round(value), 0, 16383);
+        }
+
+        /// <summary>Pošle kanálu pitch bend = bend ze souboru + jemné doladění. Bicí (D10) se neladí.</summary>
+        private void SendBend(int channel)
+        {
+            var device = _outputDevice;
+            if (device == null || channel == PercussionChannel) return;
+
+            ushort value = ComposeBendValue(_channelBendCents[channel], _tuning.RemainderCents);
+            device.SendEvent(new PitchBendEvent(value)
+            {
+                Channel = (FourBitNumber)channel
+            });
+        }
+
+        private void SendTuningBendToAllChannels()
+        {
+            for (int channel = 0; channel <= 15; channel++)
+            {
+                SendBend(channel);
+            }
+        }
+
+        private void SendControl(int channel, int controlNumber, int value)
+        {
+            _outputDevice?.SendEvent(new ControlChangeEvent((SevenBitNumber)controlNumber, (SevenBitNumber)value)
+            {
+                Channel = (FourBitNumber)channel
+            });
+        }
+
+        /// <summary>
+        /// Nastaví na všech melodických kanálech rozsah pitch bendu na ±2
+        /// půltóny (RPN 0,0 = 2 půltóny + 0 centů) - na tom stojí veškerá
+        /// matematika výše (PitchBendRangeCents = 200). Nakonec se vybere
+        /// "nulový" RPN (127,127), aby pozdější zprávy Data Entry omylem
+        /// nic nepřepsaly.
+        /// </summary>
+        private void SetPitchBendRangeOnAllChannels()
+        {
+            for (int channel = 0; channel <= 15; channel++)
+            {
+                if (channel == PercussionChannel) continue;
+
+                SendControl(channel, 101, 0);     // RPN MSB
+                SendControl(channel, 100, 0);     // RPN LSB  -> RPN 0,0 = Pitch Bend Sensitivity
+                SendControl(channel, 6, 2);       // Data Entry MSB = 2 půltóny
+                SendControl(channel, 38, 0);      // Data Entry LSB = 0 centů
+                SendControl(channel, 101, 127);   // RPN null
+                SendControl(channel, 100, 127);
+            }
+        }
+
+        private void SendTunedNoteOn(NoteOnEvent noteOn)
+        {
+            var device = _outputDevice;
+            if (device == null) return;
+
+            int channel = noteOn.Channel;
+            int note = noteOn.NoteNumber;
+
+            // Bicí se neladí a nepřečíslovávají se.
+            if (channel == PercussionChannel)
+            {
+                device.SendEvent(noteOn);
+                return;
+            }
+
+            // NoteOn s nulovou velocity je podle MIDI standardu ve skutečnosti
+            // NoteOff (DryWetMidi je obvykle čte rovnou jako NoteOffEvent, ale
+            // pro jistotu to ošetříme i tady).
+            if (noteOn.Velocity == 0)
+            {
+                SendTunedNoteOffCore(device, channel, note, (SevenBitNumber)0);
+                return;
+            }
+
+            int sentNote = note + _tuning.WholeSemitones;
+
+            // Mimo rozsah MIDI not (0-127) - tahle nota se při daném ladění
+            // prostě nezahraje. Kdyby se stejná nota ještě držela z dřívějška,
+            // zrušíme ji.
+            if (sentNote < 0 || sentNote > 127)
+            {
+                SendTunedNoteOffCore(device, channel, note, (SevenBitNumber)0);
+                return;
+            }
+
+            // Stejná nota rozeznívaná znovu, přestože předchozí pořád zní s
+            // JINÝM posunem (ladění se mezitím změnilo) - tu starou nejdřív
+            // vypneme, jinak by jí nikdo nikdy neposlal NoteOff.
+            if (_sentNotes.TryGetValue((channel, note), out int previouslySent) && previouslySent != sentNote)
+            {
+                device.SendEvent(new NoteOffEvent((SevenBitNumber)previouslySent, (SevenBitNumber)0)
+                {
+                    Channel = noteOn.Channel
+                });
+            }
+
+            _sentNotes[(channel, note)] = sentNote;
+
+            if (sentNote == note)
+            {
+                device.SendEvent(noteOn);
+            }
+            else
+            {
+                // Událost ze souboru se NIKDY nemění přímo (Playback ji drží
+                // a při převinutí by ji přehrál znovu už změněnou) - vyrobíme novou.
+                device.SendEvent(new NoteOnEvent((SevenBitNumber)sentNote, noteOn.Velocity)
+                {
+                    Channel = noteOn.Channel
+                });
+            }
+        }
+
+        private void SendTunedNoteOff(NoteOffEvent noteOff)
+        {
+            var device = _outputDevice;
+            if (device == null) return;
+
+            int channel = noteOff.Channel;
+            if (channel == PercussionChannel)
+            {
+                device.SendEvent(noteOff);
+                return;
+            }
+
+            SendTunedNoteOffCore(device, channel, noteOff.NoteNumber, noteOff.Velocity);
+        }
+
+        private void SendTunedNoteOffCore(OutputDevice device, int channel, int note, SevenBitNumber velocity)
+        {
+            // Nota, kterou jsme nikdy nerozezněli (např. byla mimo rozsah),
+            // se ani nevypíná.
+            if (!_sentNotes.TryGetValue((channel, note), out int sentNote)) return;
+
+            _sentNotes.Remove((channel, note));
+
+            device.SendEvent(new NoteOffEvent((SevenBitNumber)sentNote, velocity)
+            {
+                Channel = (FourBitNumber)channel
+            });
         }
 
         private int ScaleToMidiVolume(int originalValue0To127)

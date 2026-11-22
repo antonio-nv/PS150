@@ -8,6 +8,13 @@ namespace PS150.Core
     {
         public int Volume { get; set; } = 80;
         public bool DrumsEnabled { get; set; } = true;
+
+        // NOVÉ: ladění / transpozice (klávesa t, viz PlayerTuning). Ve
+        // starém settings.json tyhle položky chybí - použijí se výchozí
+        // hodnoty níž (ladění vypnuté, A4 = 440 Hz, bez transpozice).
+        public bool TuningActive { get; set; } = false;
+        public double TuningTransposeSemitones { get; set; } = 0.0;
+        public double TuningReferenceA4Hz { get; set; } = 440.0;
         public string? LastFolderPath { get; set; }
         public string? LastFilePath { get; set; }
         public long LastPositionMs { get; set; } = 0;

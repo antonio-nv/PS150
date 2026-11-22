@@ -69,6 +69,13 @@ namespace PS150.UI.Windows
         private bool _isPaused = false;
         private bool _isMidiMode = false;
 
+        // NOVÉ: ladění / transpozice (klávesa t, zadávání hodnot klávesou INSERT).
+        // _tuning je neměnný objekt (viz PlayerTuning) - při změně se celý vymění.
+        private PlayerTuning _tuning = PlayerTuning.Off;
+        private bool _tuningInputActive = false;
+        private readonly StringBuilder _tuningInputBuffer = new StringBuilder();
+        private string? _tuningInputError = null;
+
         private readonly StringBuilder _registerInputBuffer = new StringBuilder();
 
         // Nastaveno, pokud navigace (PageUp/PageDown i automatické doehrání
@@ -86,6 +93,15 @@ namespace PS150.UI.Windows
 
             _volume = _settings.Volume;
 
+            // NOVÉ: ladění uložené z minula (settings.json) se hned použije,
+            // než se načte první soubor.
+            _tuning = new PlayerTuning(
+                _settings.TuningActive,
+                _settings.TuningTransposeSemitones,
+                _settings.TuningReferenceA4Hz);
+            _midiPlayer.SetTuning(_tuning);
+            _audioPlayer.SetSpeedFactor(_tuning.SpeedFactor);
+
             _grid = new TextGridControl(Cols, 20);
             Canvas.SetLeft(_grid, 0);
             Canvas.SetTop(_grid, 0);
@@ -95,6 +111,12 @@ namespace PS150.UI.Windows
 
             AddTransportButtons();
             WireMidiPlayerEvents();
+
+            // NOVÉ: znaky zadávané při psaní ladění (INSERT) se berou z události
+            // TextInput, ne z KeyDown - TextInput dostane skutečný znak podle
+            // rozložení klávesnice (na české klávesnici třeba "+" nebo číslice
+            // přes Shift), kdežto KeyDown zná jen fyzickou klávesu.
+            TextInput += Window_TextInput;
 
             _tickTimer.Tick += (s, e) => Tick();
         }
@@ -242,6 +264,35 @@ namespace PS150.UI.Windows
             {
                 Close();
                 return;
+            }
+
+            // NOVÉ: když se právě zadává ladění (INSERT), řídicí klávesy
+            // obslouží tady, a ZNAKOVÉ klávesy se záměrně NEoznačí jako
+            // vyřízené (e.Handled zůstane false) - jedině tak WPF vyvolá
+            // událost TextInput, která znak doručí do Window_TextInput níž.
+            if (_tuningInputActive)
+            {
+                switch (e.Key)
+                {
+                    case Key.Enter:
+                        CommitTuningInput();
+                        e.Handled = true;
+                        return;
+
+                    case Key.Escape:
+                        CancelTuningInput();
+                        e.Handled = true;
+                        return;
+
+                    case Key.Back:
+                        if (_tuningInputBuffer.Length > 0) _tuningInputBuffer.Length--;
+                        _tuningInputError = null;
+                        e.Handled = true;
+                        return;
+
+                    default:
+                        return;
+                }
             }
 
             bool keepRunning = HandleInput(e.Key);
@@ -497,8 +548,92 @@ namespace PS150.UI.Windows
                 case Key.Down:
                     ChangeVolume(-5);
                     break;
+
+                case Key.T:
+                    // NOVÉ: ladění zapnout/vypnout (hodnoty se zachovají)
+                    ApplyTuning(_tuning.WithActive(!_tuning.Active));
+                    break;
+
+                case Key.Insert:
+                    // NOVÉ: zadání hodnoty ladění (zároveň ladění zapne)
+                    BeginTuningInput();
+                    break;
             }
             return true;
+        }
+
+        // ------------------------------------------------------------------
+        // NOVÉ: ladění / transpozice
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Použije nové ladění všude, kde se projeví: u MIDI přes pitch bend,
+        /// u zvukových souborů změnou rychlosti. Uloží ho do settings.json
+        /// a vymaže mřížku, protože se tím mění počet řádků na obrazovce.
+        /// </summary>
+        private void ApplyTuning(PlayerTuning tuning)
+        {
+            _tuning = tuning;
+
+            _midiPlayer.SetTuning(tuning);
+            _audioPlayer.SetSpeedFactor(tuning.SpeedFactor);
+
+            _settings.TuningActive = tuning.Active;
+            _settings.TuningTransposeSemitones = tuning.TransposeSemitones;
+            _settings.TuningReferenceA4Hz = tuning.ReferenceA4Hz;
+            _settings.Save();
+
+            _grid.Clear();
+        }
+
+        private void BeginTuningInput()
+        {
+            _tuningInputBuffer.Clear();
+            _tuningInputError = null;
+            _tuningInputActive = true;
+            _grid.Clear();
+        }
+
+        private void CancelTuningInput()
+        {
+            _tuningInputBuffer.Clear();
+            _tuningInputError = null;
+            _tuningInputActive = false;
+            _grid.Clear();
+        }
+
+        /// <summary>ENTER při zadávání: přečte text, a když je v pořádku, použije ho. Při chybě zůstane zadávání otevřené a ukáže se důvod.</summary>
+        private void CommitTuningInput()
+        {
+            if (PlayerTuning.TryParseInput(_tuningInputBuffer.ToString(), _tuning, out PlayerTuning parsed, out string error))
+            {
+                _tuningInputBuffer.Clear();
+                _tuningInputError = null;
+                _tuningInputActive = false;
+                ApplyTuning(parsed);
+            }
+            else
+            {
+                _tuningInputError = error;
+            }
+        }
+
+        /// <summary>Doručuje napsané znaky do zadávání ladění (jen když je aktivní). Povolené jsou číslice, + - . , a písmeno A.</summary>
+        private void Window_TextInput(object sender, TextCompositionEventArgs e)
+        {
+            if (!_tuningInputActive) return;
+
+            foreach (char c in e.Text)
+            {
+                bool allowed = char.IsDigit(c) || c == '+' || c == '-' || c == '.' || c == ',' || c == 'a' || c == 'A';
+                if (allowed && _tuningInputBuffer.Length < 8)
+                {
+                    _tuningInputBuffer.Append(c);
+                    _tuningInputError = null;
+                }
+            }
+
+            e.Handled = true;
         }
 
 
@@ -648,7 +783,11 @@ namespace PS150.UI.Windows
                 }
             }
 
-            int totalRows = (showAudioMeters ? 2 : 0) + (showOrganPanel ? 5 : 0) + staffRows;
+            // NOVÉ: řádek s laděním (jen když je aktivní) a při zadávání
+            // ještě dva řádky: vstupní pole a nápověda / chyba.
+            int tuningRows = (_tuning.Active ? 1 : 0) + (_tuningInputActive ? 2 : 0);
+
+            int totalRows = (showAudioMeters ? 2 : 0) + tuningRows + (showOrganPanel ? 5 : 0) + staffRows;
             if (EnsureRows(_contentStartRow + totalRows))
             {
                 RenderDashboard();
@@ -673,6 +812,38 @@ namespace PS150.UI.Windows
                 _grid.Write(barR);
                 _grid.ResetColor();
                 _grid.WriteLine(TextLayout.FitWidth($"]{_rightDb,5:F1}dB", Cols - 4 - barWidth));
+            }
+
+            // NOVÉ: řádek ladění (T = transpozice v půltónech, A = referenční A4
+            // v Hz, vpravo výsledná odchylka v centech) - jen když je ladění aktivní.
+            if (_tuning.Active)
+            {
+                _grid.ForegroundColor = ConsoleColor.Yellow;
+                _grid.WriteLine(TextLayout.FitWidth(_tuning.Describe(), Cols));
+                _grid.ResetColor();
+            }
+
+            // NOVÉ: zadávání hodnoty ladění (po klávese INSERT).
+            if (_tuningInputActive)
+            {
+                _grid.ForegroundColor = ConsoleColor.White;
+                _grid.Write(" Vstup:[");
+                _grid.ForegroundColor = ConsoleColor.Red;
+                _grid.Write(_tuningInputBuffer.ToString().PadRight(8));
+                _grid.ResetColor();
+                _grid.WriteLine(TextLayout.FitWidth("] Ent/Esc", Cols - 8 - 8));
+
+                if (_tuningInputError != null)
+                {
+                    _grid.ForegroundColor = ConsoleColor.Red;
+                    _grid.WriteLine(TextLayout.FitWidth($" {_tuningInputError}", Cols));
+                }
+                else
+                {
+                    _grid.ForegroundColor = ConsoleColor.DarkGray;
+                    _grid.WriteLine(TextLayout.FitWidth(" +0.5 = pt   A442 = Hz", Cols));
+                }
+                _grid.ResetColor();
             }
 
             if (showOrganPanel)
