@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using PS150.Core.Filters;
+using PS150.Core.Network;
 using PS150.Core.Output;
 
 // ======================================================================
@@ -37,9 +38,10 @@ using PS150.Core.Output;
 //   --channels 6            počet kanálů
 //   --rate 48000            vzorkovací kmitočet
 //   --latency 50            latence v ms
-//   --xover 2000            dělicí kmitočet výhybky v Hz
+//   --xover 1000            dělicí kmitočet výhybky v Hz
 //   --auto                  bez klávesnice: projde postupně všechny kanály a skončí
 //   --selftest              spočítá chování výhybky bez zvukové karty a skončí
+//   --nettest               nasimuluje přenos po síti (ztráty, kolísání, drift hodin) a skončí
 // ======================================================================
 
 // ---- NASTAVENÍ NATVRDO ----
@@ -47,7 +49,7 @@ const int ChannelHighL = 0;
 const int ChannelHighR = 1;
 const int ChannelLowL = 2;
 const int ChannelLowR = 3;
-const double DefaultCrossoverHz = 2000.0;   // dělicí kmitočet: změňte tady (nebo --xover)
+const double DefaultCrossoverHz = 1000.0;   // dělicí kmitočet: změňte tady (nebo --xover)
 
 string device = "surround51:0";
 int channels = 6;
@@ -56,6 +58,7 @@ int latencyMs = 50;
 double crossoverHz = DefaultCrossoverHz;
 bool autoMode = false;
 bool selfTest = false;
+bool netTest = false;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -68,6 +71,7 @@ for (int i = 0; i < args.Length; i++)
         case "--xover" when i + 1 < args.Length: crossoverHz = double.Parse(args[++i], CultureInfo.InvariantCulture); break;
         case "--auto": autoMode = true; break;
         case "--selftest": selfTest = true; break;
+        case "--nettest": netTest = true; break;
         default:
             Console.WriteLine($"Neznámý parametr: {args[i]}");
             return 1;
@@ -80,6 +84,12 @@ Console.WriteLine($"Procesorů: {Environment.ProcessorCount}");
 if (selfTest)
 {
     RunSelfTest(sampleRate, crossoverHz);
+    return 0;
+}
+
+if (netTest)
+{
+    RunNetTest(sampleRate);
     return 0;
 }
 
@@ -458,6 +468,94 @@ static void RunSelfTest(int sampleRate, double crossoverHz)
 
         Console.WriteLine($"  {freq,7:F0} Hz  {lowDb,8:F2} dB {highDb,8:F2} dB {bothDb,8:F2} dB");
     }
+}
+
+// Simulace přenosu po síti bez sítě: odesílatel posílá sinus 1 kHz v paketech po
+// 128 snímcích. Do cesty vložíme zpoždění s kolísáním (3-15 ms a občas špička 40 ms),
+// 1 % ztracených paketů, přeházené pořadí a rozdíl hodin +100 ppm (odesílatel
+// "jede" rychleji než zvuková karta). Příjemce čte po 256 snímcích v pravidelném
+// tempu. Výsledek ukáže, jak se buffer s tím vyrovná.
+static void RunNetTest(int sampleRate)
+{
+    const int channels = 2;
+    const int packetFrames = 128;
+    const int readFrames = 256;
+    const double seconds = 60.0;
+    const double lossProbability = 0.01;
+    const int targetDelayMs = 30;
+
+    var random = new Random(1);
+    double senderRate = sampleRate * (1.0 + 100e-6);
+    int packetCount = (int)(seconds * senderRate / packetFrames);
+
+    var arrivals = new List<(double Time, AudioPacket Packet)>();
+    var samples = new float[packetFrames * channels];
+    var bytes = new byte[AudioPacket.EncodedSize(packetFrames, channels, AudioSampleFormat.Float32)];
+    int sent = 0;
+    int dropped = 0;
+
+    for (int k = 0; k < packetCount; k++)
+    {
+        sent++;
+        if (random.NextDouble() < lossProbability) { dropped++; continue; }
+
+        long firstFrame = (long)k * packetFrames;
+        for (int f = 0; f < packetFrames; f++)
+        {
+            float v = (float)(0.5 * Math.Sin(2.0 * Math.PI * 1000.0 * (firstFrame + f) / sampleRate));
+            samples[f * channels] = v;
+            samples[f * channels + 1] = v;
+        }
+
+        int n = AudioPacket.Encode(bytes, 7u, (uint)k, firstFrame, sampleRate, channels, AudioSampleFormat.Float32, samples);
+        if (!AudioPacket.TryDecode(bytes.AsSpan(0, n), out AudioPacket? packet) || packet == null)
+        {
+            Console.WriteLine("CHYBA: paket se nepodařilo dekódovat.");
+            return;
+        }
+
+        double sendTime = k * packetFrames / senderRate;
+        double delay = 0.003 + random.NextDouble() * 0.012 + (random.NextDouble() < 0.002 ? 0.04 : 0.0);
+        arrivals.Add((sendTime + delay, packet));
+    }
+
+    arrivals.Sort((a, b) => a.Time.CompareTo(b.Time));
+
+    var jitter = new AudioJitterBuffer(channels, sampleRate, targetDelayMs);
+    var block = new float[readFrames * channels];
+    int ticks = (int)(seconds * sampleRate / readFrames);
+    int next = 0;
+    long measured = 0, silent = 0;
+    double minFill = double.MaxValue, maxFill = 0.0;
+
+    for (int t = 0; t < ticks; t++)
+    {
+        double time = t * (double)readFrames / sampleRate;
+        while (next < arrivals.Count && arrivals[next].Time <= time) jitter.Push(arrivals[next++].Packet);
+
+        jitter.Read(block);
+
+        if (time > 3.0)
+        {
+            double fill = jitter.FillMs;
+            if (fill < minFill) minFill = fill;
+            if (fill > maxFill) maxFill = fill;
+
+            for (int f = 0; f < readFrames; f++)
+            {
+                measured++;
+                if (block[f * channels] == 0f && block[f * channels + 1] == 0f) silent++;
+            }
+        }
+    }
+
+    Console.WriteLine($"Simulace přenosu: {seconds:F0} s, {sampleRate} Hz, cílové zpoždění {targetDelayMs} ms");
+    Console.WriteLine($"  odesláno {sent} paketů, ztraceno na cestě {dropped} ({100.0 * dropped / sent:F2} %)");
+    Console.WriteLine($"  příjemce: přijato {jitter.PacketsReceived}, hlášeno ztracených {jitter.PacketsLost}, " +
+                      $"přeházených {jitter.PacketsReordered}, pozdních {jitter.PacketsLate}");
+    Console.WriteLine($"  výpadky zvuku (underrun) {jitter.Underruns}, srovnání bufferu {jitter.Resyncs}");
+    Console.WriteLine($"  zaplnění bufferu: {minFill:F1} až {maxFill:F1} ms, korekce tempa nakonec {jitter.RatePpm:F0} ppm");
+    Console.WriteLine($"  tichých snímků na výstupu: {100.0 * silent / Math.Max(1, measured):F2} % (čekáme zhruba podíl ztracených paketů)");
 }
 
 // Stav sdílený mezi klávesnicí (hlavní vlákno) a zvukovým vláknem.
