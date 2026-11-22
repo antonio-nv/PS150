@@ -46,7 +46,7 @@ using PS150.Core.Output;
 //   --receive               VIRTUÁLNÍ ZVUKOVKA: přijímá zvuk z PC po síti, vede ho přes výhybku
 //                           (výšky 0,1, hloubky 2,3) do karty a odpovídá na dotazy přehrávače
 //   --port 5150             UDP port pro příjem (výchozí podle NetworkDefaults)
-//   --delay 30              rezerva proti kolísání sítě v ms (kabel ~20-30, WiFi 60-100)
+//   --delay 80              rezerva proti kolísání sítě v ms (kabel ~20-30, WiFi 80-120)
 // ======================================================================
 
 // ---- NASTAVENÍ NATVRDO ----
@@ -66,7 +66,7 @@ bool selfTest = false;
 bool netTest = false;
 bool receiveMode = false;
 int udpPort = PS150.Core.Network.NetworkDefaults.Port;
-int delayMs = 30;
+int delayMs = 80;   // na WiFi je 80-100 ms rozumné; na kabelu stačí 20-30 (--delay)
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -539,6 +539,15 @@ static int RunReceiver(AlsaOutput card, double startCrossoverHz, int targetDelay
             {
                 jitter.Read(inBuf);   // když nic nepřichází, vrací ticho
 
+                // úroveň příchozího zvuku (před hlasitostí), pomalu klesající špička
+                float blockPeak = 0f;
+                for (int i = 0; i < inBuf.Length; i++)
+                {
+                    float a = Math.Abs(inBuf[i]);
+                    if (a > blockPeak) blockPeak = a;
+                }
+                st.PeakIn = Math.Max(blockPeak, st.PeakIn * 0.98);
+
                 double wanted = st.CrossoverHz;
                 if (wanted != applied)
                 {
@@ -599,9 +608,11 @@ static int RunReceiver(AlsaOutput card, double startCrossoverHz, int targetDelay
             statusClock.Restart();
             string source = rx.LastAudioAgeMs < 500 ? "vysílá" : "ticho";
             double db = 20.0 * Math.Log10(Math.Max(st.Gain, 1e-6));
+            double dbIn = 20.0 * Math.Log10(Math.Max(st.PeakIn, 1e-6));
             string mode = st.Crossover ? $"výhybka {st.CrossoverHz:F0} Hz" : "bez výhybky";
             Console.Write($"\r  {source,-7} {mode,-18} zaplnění {jitter.FillMs,5:F1} ms  ztraceno {jitter.PacketsLost}  " +
-                          $"pozdě {jitter.PacketsLate}  výpadky {jitter.Underruns}  tempo {jitter.RatePpm,5:F0} ppm  {db,5:F0} dB   ");
+                          $"pozdě {jitter.PacketsLate}  výpadky {jitter.Underruns}  tempo {jitter.RatePpm,4:F0} ppm  " +
+                          $"vstup {dbIn,4:F0} dB  hlasitost {db,4:F0} dB   ");
         }
 
         if (interactive && Console.KeyAvailable)
@@ -759,6 +770,7 @@ sealed class ReceiverState
     public volatile bool Crossover;
     public double CrossoverHz;
     public double Gain;
+    public double PeakIn;
 }
 
 sealed class ToneState

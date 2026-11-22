@@ -4,20 +4,29 @@
         Title="♪♫ PS150 Player."
         SizeToContent="WidthAndHeight"
         ResizeMode="CanMinimize"
-        WindowStyle="SingleBorderWindow"
+        WindowStyle="None"
         Background="Black"
         KeyDown="Window_KeyDown"
         MouseWheel="Window_MouseWheel"
+        MouseLeftButtonDown="Window_MouseLeftButtonDown"
         Closing="Window_Closing"
         Loaded="Window_Loaded">
     <!--
-        ResizeMode="CanMinimize" - stejné jako u obyčejného okna: minimalizace
-        a zavření jdou, maximalizační tlačítko je vidět, ale je zašedlé/neaktivní
-        (WPF ho takhle kreslí samo, není potřeba žádný P/Invoke trik jako
-        dřív v konzoli). SizeToContent necháváme okno samo spočítat přesnou
-        velikost podle textové mřížky (viz FileBrowserWindow.xaml.cs) - mění
-        se to podle počtu řádků (MIDI kanály / zalomená cesta), stejně jako
-        se dřív měnila výška konzole, jen bez toho původního console bugu.
+        NOVÉ: WindowStyle="None" - systémový titulek se nekreslí, titulek, [_] a [X]
+        jsou vykreslené v textové mřížce (řádek 0, viz RenderDashboard) a klikání
+        na ně / tažení za titulek řeší Window_MouseLeftButtonDown.
+
+        RotationHost: sem se klávesou r nastavuje LayoutTransform (otočení o 90 stupňů).
+        LayoutTransform (na rozdíl od RenderTransform) otočí i rozměry při výpočtu
+        rozvržení, takže si okno (SizeToContent) samo vezme tvar vysokého úzkého
+        pruhu; klikání myší funguje v otočeném stavu beze změny.
+
+        Border kolem dokola je jen tenký rámeček, ať je okno bez systémového
+        titulku vidět na tmavém pozadí.
     -->
-    <Canvas x:Name="RootCanvas" Background="Black"/>
+    <Border BorderBrush="#FF007070" BorderThickness="1" Background="Black">
+        <Grid x:Name="RotationHost">
+            <Canvas x:Name="RootCanvas" Background="Black"/>
+        </Grid>
+    </Border>
 </Window>

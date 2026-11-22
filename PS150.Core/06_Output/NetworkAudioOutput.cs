@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 using PS150.Core.Common;
 using PS150.Core.Network;
@@ -25,6 +26,17 @@ namespace PS150.Core.Output
     /// </summary>
     public sealed class NetworkAudioOutput : IAudioOutput
     {
+        // Windows má výchozí rozlišení časovače 15,6 ms, takže Thread.Sleep(1) trvá
+        // až 15 ms a pakety by odcházely v dávkách (příjemci to zhoršuje kolísání).
+        // timeBeginPeriod(1) ho zjemní na 1 ms po dobu, kdy výstup existuje.
+        [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+        private static extern uint TimeBeginPeriod(uint milliseconds);
+
+        [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+        private static extern uint TimeEndPeriod(uint milliseconds);
+
+        private bool _timerPeriodSet;
+
         private const double MaxLateMs = 50.0;    // když jsme po termínu víc, než tohle, tempo se přenastaví (žádné dohánění dávkou)
 
         private readonly Socket _socket;
@@ -68,6 +80,16 @@ namespace PS150.Core.Output
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _socket.Connect(new IPEndPoint(IPAddress.Parse(host), port));   // u UDP jen nastaví cíl, nic se nenavazuje
+
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    TimeBeginPeriod(1);
+                    _timerPeriodSet = true;
+                }
+                catch (Exception) { /* bez zjemnění to funguje taky, jen s větším kolísáním */ }
+            }
         }
 
         public void Write(ReadOnlySpan<float> interleaved)
@@ -140,6 +162,12 @@ namespace PS150.Core.Output
             if (_disposed) return;
             _disposed = true;
             try { _socket.Close(); } catch { }
+
+            if (_timerPeriodSet)
+            {
+                _timerPeriodSet = false;
+                try { TimeEndPeriod(1); } catch (Exception) { }
+            }
         }
     }
 }

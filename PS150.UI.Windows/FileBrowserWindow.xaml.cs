@@ -28,20 +28,23 @@ namespace PS150.UI.Windows
     /// </summary>
     public partial class FileBrowserWindow : Window
     {
-        // Pevný počet sloupců mřížky - odpovídá dřívějšímu ContentWidth
-        // (ConsoleWidth - 1) z VgaEngine. Ta "-1" rezerva tam byla čistě
-        // kvůli console bugu; tady žádné skutečné zalamování řádků
-        // nehrozí, ale ponechává se stejná šířka, ať zůstane platná
-        // veškerá stará matematika odvozená od ní (FitWidth, WrapPath,
-        // pozice VU pruhů...).
-        private const int Cols = 29;
+        // Pevný počet sloupců mřížky. Přehrávač je široký a placatý (cesta i jméno
+        // souboru se mají vejít na jeden řádek bez zalomení): 121 znaků odpovídá
+        // šířce mixážního pultu z návrhu. Po otočení o 90 stupňů (klávesa r) je
+        // to naopak vysoký úzký pruh.
+        private const int Cols = 121;
 
-        // Řádek s transportními tlačítky - o 1 níž než v původním
-        // VgaEngine, protože tady už není žádný ručně kreslený "fake"
-        // title bar na řádku 0 (to teď dělá nativní okno).
-        private const int TransportButtonsRow = 2;
+        // Záhlaví má pevné čtyři řádky:
+        //   0 titulek okna (vlastní) + transportní tlačítka + [_] [X]
+        //   1 cesta a jméno souboru (jeden řádek, bez zalomení)
+        //   2 VU metry L a P (u MIDI přehled)
+        //   3 čas, hlasitost, ladění, AJI, výstup
+        // Vše další (zadávání ladění, varhanní panel, MIDI osnovy) se kreslí pod ně.
+        private const int HeaderRows = 4;
 
-        private int _contentStartRow = 6;
+        // Sloupec, kde v titulku začínají transportní tlačítka [<<] [►] [▄] [>>].
+        private const int TransportCol = 20;
+
         private int _lastDesiredRows = -1;
 
         private readonly TextGridControl _grid;
@@ -102,6 +105,9 @@ namespace PS150.UI.Windows
             InitializeComponent();
 
             _volume = _settings.Volume;
+
+            // NOVÉ: otočení o 90 stupňů uložené z minula (klávesa r).
+            ApplyRotation(_settings.Rotated90);
 
             // NOVÉ: ladění uložené z minula (settings.json) se hned použije,
             // než se načte první soubor.
@@ -202,10 +208,10 @@ namespace PS150.UI.Windows
         /// </summary>
         private void AddTransportButtons()
         {
-            AddTransportButton(1, 4, (s, e) => _audioPlayer.Seek(-5.0));
-            AddTransportButton(6, 8, (s, e) => { if (_isPaused) TogglePlayPause(); RenderDashboard(); });
-            AddTransportButton(10, 12, (s, e) => { if (!_isPaused) TogglePlayPause(); RenderDashboard(); });
-            AddTransportButton(14, 17, (s, e) => _audioPlayer.Seek(5.0));
+            AddTransportButton(TransportCol, TransportCol + 3, (s, e) => _audioPlayer.Seek(-5.0));
+            AddTransportButton(TransportCol + 5, TransportCol + 7, (s, e) => { if (_isPaused) TogglePlayPause(); RenderDashboard(); });
+            AddTransportButton(TransportCol + 9, TransportCol + 11, (s, e) => { if (!_isPaused) TogglePlayPause(); RenderDashboard(); });
+            AddTransportButton(TransportCol + 13, TransportCol + 16, (s, e) => _audioPlayer.Seek(5.0));
         }
 
         private void AddTransportButton(int colStart, int colEndInclusive, RoutedEventHandler onClick)
@@ -221,7 +227,7 @@ namespace PS150.UI.Windows
             button.Click += onClick;
             button.Click += (s, e) => RenderDashboard();
             Canvas.SetLeft(button, colStart * _grid.CellWidth);
-            Canvas.SetTop(button, TransportButtonsRow * _grid.CellHeight);
+            Canvas.SetTop(button, 0);   // tlačítka jsou v titulku (řádek 0)
             RootCanvas.Children.Add(button);
         }
 
@@ -229,6 +235,82 @@ namespace PS150.UI.Windows
         {
             RestoreWindowPosition();
             StartWithPendingFile();
+
+            // Otočené okno je vysoké - ať nevyčnívá dolů z obrazovky.
+            Dispatcher.BeginInvoke(new Action(KeepOnScreen), DispatcherPriority.Loaded);
+        }
+
+        // ------------------------------------------------------------------
+        // NOVÉ: vlastní titulek (řádek 0 mřížky) a otáčení o 90 stupňů
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Klik myší: v řádku titulku [_] minimalizuje, [X] zavře, jinde se za
+        /// titulek okno tahá. Souřadnice se berou přímo v prostoru mřížky
+        /// (GetPosition(RootCanvas)), takže to funguje stejně i po otočení.
+        /// Transportní tlačítka jsou skutečná tlačítka a událost si vezmou sama.
+        /// </summary>
+        private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            Point p = e.GetPosition(RootCanvas);
+            if (p.X < 0 || p.Y < 0) return;
+
+            int col = (int)(p.X / _grid.CellWidth);
+            int row = (int)(p.Y / _grid.CellHeight);
+            if (row != 0) return;
+
+            if (col >= Cols - 8 && col <= Cols - 6)
+            {
+                WindowState = WindowState.Minimized;
+                return;
+            }
+
+            if (col >= Cols - 4 && col <= Cols - 2)
+            {
+                Close();
+                return;
+            }
+
+            try
+            {
+                if (e.ButtonState == MouseButtonState.Pressed) DragMove();
+            }
+            catch (InvalidOperationException)
+            {
+                // tlačítko myši mezitím povolili - tažení se nekoná
+            }
+        }
+
+        /// <summary>
+        /// Otočí celý obsah o 90 stupňů (po směru hodinových ručiček). LayoutTransform
+        /// otočí i rozměry, takže se okno samo přizpůsobí (SizeToContent se po
+        /// přepnutí na Manual a zpět přepočítá).
+        /// </summary>
+        private void ApplyRotation(bool rotated)
+        {
+            RotationHost.LayoutTransform = rotated ? new RotateTransform(90) : Transform.Identity;
+
+            SizeToContent = SizeToContent.Manual;
+            SizeToContent = SizeToContent.WidthAndHeight;
+
+            if (IsLoaded)
+            {
+                Dispatcher.BeginInvoke(new Action(KeepOnScreen), DispatcherPriority.Loaded);
+            }
+        }
+
+        /// <summary>Po změně tvaru okna ho posune tak, aby celé zůstalo na obrazovce.</summary>
+        private void KeepOnScreen()
+        {
+            UpdateLayout();
+
+            double left = SystemParameters.VirtualScreenLeft;
+            double top = SystemParameters.VirtualScreenTop;
+            double right = left + SystemParameters.VirtualScreenWidth;
+            double bottom = top + SystemParameters.VirtualScreenHeight;
+
+            if (Left + ActualWidth > right) Left = Math.Max(left, right - ActualWidth);
+            if (Top + ActualHeight > bottom) Top = Math.Max(top, bottom - ActualHeight);
         }
 
         private void RestoreWindowPosition()
@@ -385,8 +467,6 @@ namespace PS150.UI.Windows
                 }
             }
 
-            RenderDashboard();
-
             // L/R (zvukovka) jen když skutečně hraje soubor přes AudioPlayer
             // - u .mid souborů jde zvuk mimo AudioPlayer (Windows GS
             // Wavetable Synth), takže by tu nebylo co měřit.
@@ -418,6 +498,8 @@ namespace PS150.UI.Windows
                 _trebleDb = AudioMeter.LinearToDecibels(treblePeak);
             }
 
+            // Záhlaví (včetně VU metrů) se kreslí až po změření úrovní výše.
+            RenderDashboard();
             RenderStatusArea();
 
             _grid.Redraw();
@@ -619,6 +701,13 @@ namespace PS150.UI.Windows
                     _grid.Clear();
                     break;
 
+                case Key.R:
+                    // NOVÉ: otočit okno o 90 stupňů / zpět (nastavení se pamatuje)
+                    _settings.Rotated90 = !_settings.Rotated90;
+                    _settings.Save();
+                    ApplyRotation(_settings.Rotated90);
+                    break;
+
                 case Key.Insert:
                     // NOVÉ: zadání hodnoty ladění (zároveň ladění zapne)
                     BeginTuningInput();
@@ -745,7 +834,7 @@ namespace PS150.UI.Windows
 
         private bool EnsureRows(int desiredRows)
         {
-            desiredRows = Math.Clamp(desiredRows, 10, 60);
+            desiredRows = Math.Clamp(desiredRows, HeaderRows, 60);
             if (desiredRows == _lastDesiredRows) return false;
             _lastDesiredRows = desiredRows;
 
@@ -757,47 +846,36 @@ namespace PS150.UI.Windows
 
         private void RenderDashboard()
         {
-            _grid.SetCursorPosition(0, 0);
-
             string currentFile = _navigator.CurrentFile ?? "No file loaded";
             string fileName = Path.GetFileName(currentFile);
             string folderPath = Path.GetDirectoryName(currentFile) ?? "";
-            string fullPath = $"{folderPath}\\{fileName}";
-
-            TimeSpan current = _isMidiMode ? _midiPlayer.CurrentTime : _audioPlayer.CurrentTime;
-            TimeSpan total = _isMidiMode ? _midiPlayer.TotalTime : _audioPlayer.TotalTime;
-            string timeStr = $"{current:mm\\:ss}/{total:mm\\:ss}";
-
-            string separator = new string('=', Cols);
-            string thinSeparator = new string('-', Cols);
-
-            // --- Řádek 0: oddělovač ---
-            _grid.ForegroundColor = ConsoleColor.Cyan;
-            _grid.WriteLine(separator);
-
-            // --- Řádek 1: hlasitost + čas (+ stav rytmiky D10 u MIDI) ---
-            _grid.ForegroundColor = ConsoleColor.Cyan;
-            string drumsIndicator = _isMidiMode ? (_midiPlayer.DrumsEnabled ? " D+" : " D-") : "";
-            _grid.WriteLine($" Vol:{_volume,3}% [{timeStr}]{drumsIndicator}".PadRight(Cols));
-
-            // --- Řádek 2: transportní tlačítka (souřadnice viz AddTransportButtons) ---
-            _grid.ForegroundColor = ConsoleColor.Yellow;
-            _grid.Write(" [<<] ");
+            string fullPath = string.IsNullOrEmpty(folderPath) ? currentFile : $"{folderPath}\\{fileName}";
 
             bool isActuallyPlaying = _isMidiMode ? !_midiPlayer.IsPaused : _audioPlayer.IsPlaying;
+
+            // ============ Řádek 0: titulek okna + transportní tlačítka + [_] [X] ============
+            // (souřadnice tlačítek viz AddTransportButtons a Window_MouseLeftButtonDown)
+            _grid.SetCursorPosition(0, 0);
+            _grid.BackgroundColor = ConsoleColor.DarkBlue;
+            _grid.ForegroundColor = ConsoleColor.White;
+            _grid.Write(" ♪♫ PS150 Player".PadRight(TransportCol));
+
+            _grid.ForegroundColor = ConsoleColor.Yellow;
+            _grid.Write("[<<]");
+            _grid.Write(" ");
 
             if (!_isPaused && isActuallyPlaying)
             {
                 _grid.BackgroundColor = ConsoleColor.Green;
                 _grid.ForegroundColor = ConsoleColor.Black;
                 _grid.Write("[►]");
-                _grid.ResetColor();
             }
             else
             {
-                _grid.ForegroundColor = ConsoleColor.DarkGray;
+                _grid.ForegroundColor = ConsoleColor.Gray;
                 _grid.Write("[►]");
             }
+            _grid.BackgroundColor = ConsoleColor.DarkBlue;
             _grid.Write(" ");
 
             if (_isPaused || !isActuallyPlaying)
@@ -805,40 +883,128 @@ namespace PS150.UI.Windows
                 _grid.BackgroundColor = ConsoleColor.DarkRed;
                 _grid.ForegroundColor = ConsoleColor.White;
                 _grid.Write("[▄]");
-                _grid.ResetColor();
             }
             else
             {
-                _grid.ForegroundColor = ConsoleColor.DarkGray;
+                _grid.ForegroundColor = ConsoleColor.Gray;
                 _grid.Write("[▄]");
             }
-            _grid.Write(" ");
+            _grid.BackgroundColor = ConsoleColor.DarkBlue;
 
             _grid.ForegroundColor = ConsoleColor.Yellow;
-            _grid.Write("[>>] ");
-            _grid.ForegroundColor = ConsoleColor.Magenta;
-            _grid.Write("♪♫");
+            _grid.Write(" [>>]");
+
+            // zbytek titulku modrý až k tlačítkům [_] [X] na pravém okraji
+            _grid.ForegroundColor = ConsoleColor.White;
+            _grid.Write(new string(' ', Math.Max(0, Cols - 9 - _grid.CursorX)));
+            _grid.Write(" ");
+            _grid.ForegroundColor = ConsoleColor.Gray;
+            _grid.Write("[_]");
+            _grid.Write(" ");
+            _grid.BackgroundColor = ConsoleColor.DarkRed;
+            _grid.ForegroundColor = ConsoleColor.White;
+            _grid.Write("[X]");
+            _grid.BackgroundColor = ConsoleColor.DarkBlue;
+            _grid.Write(" ");
             _grid.ResetColor();
             _grid.WriteLine();
 
-            // --- Řádek 3: oddělovač ---
-            _grid.ForegroundColor = ConsoleColor.Cyan;
-            _grid.WriteLine(separator);
-            _grid.ResetColor();
-
-            // --- Cesta k souboru, zalomená na šířku okna ---
-            var pathLines = TextLayout.WrapPath(fullPath, Cols - 1);
-            foreach (string line in pathLines)
+            // ============ Řádek 1: cesta a jméno souboru na jednom řádku ============
+            // Když se nevejde, zkrátí se začátek cesty (jméno souboru zůstane celé).
+            string shown = fullPath;
+            int maxLen = Cols - 2;
+            if (shown.Length > maxLen)
             {
-                _grid.WriteLine($" {line}".PadRight(Cols));
+                shown = "..." + shown.Substring(shown.Length - (maxLen - 3));
             }
 
-            _grid.ForegroundColor = ConsoleColor.DarkGray;
-            _grid.WriteLine(thinSeparator);
-            _grid.ResetColor();
+            int slash = shown.LastIndexOf('\\');
+            string dirPart = slash >= 0 ? shown.Substring(0, slash + 1) : "";
+            string namePart = slash >= 0 ? shown.Substring(slash + 1) : shown;
 
-            // Řádky: sep(1) + vol(1) + transport(1) + sep(1) + cesta(pathLines.Count) + tenký oddělovač(1)
-            _contentStartRow = 4 + pathLines.Count + 1;
+            _grid.SetCursorPosition(0, 1);
+            _grid.ForegroundColor = ConsoleColor.Gray;
+            _grid.Write(" " + dirPart);
+            _grid.ForegroundColor = ConsoleColor.White;
+            _grid.Write(namePart);
+            _grid.ResetColor();
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
+
+            // ============ Řádek 2: VU metry L a P (u MIDI přehled) ============
+            _grid.SetCursorPosition(0, 2);
+
+            if (!_isMidiMode)
+            {
+                const int meterWidth = 44;
+
+                _grid.Write(" L:[");
+                _grid.ForegroundColor = ConsoleColor.Green;
+                _grid.Write(AudioMeter.RenderBar(_leftDb, meterWidth));
+                _grid.ResetColor();
+                _grid.Write($"]{_leftDb,6:F1}dB  ");
+
+                _grid.Write("R:[");
+                _grid.ForegroundColor = ConsoleColor.Green;
+                _grid.Write(AudioMeter.RenderBar(_rightDb, meterWidth));
+                _grid.ResetColor();
+                _grid.Write($"]{_rightDb,6:F1}dB");
+            }
+            else
+            {
+                int channelCount;
+                lock (_midiNotesLock) { channelCount = _midiUsedChannels.Length; }
+
+                _grid.ForegroundColor = ConsoleColor.DarkGray;
+                _grid.Write($" MIDI (Microsoft GS Wavetable Synth), kanálů: {channelCount}");
+                _grid.ResetColor();
+            }
+
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
+
+            // ============ Řádek 3: čas, hlasitost, ladění, AJI, výstup ============
+            TimeSpan current = _isMidiMode ? _midiPlayer.CurrentTime : _audioPlayer.CurrentTime;
+            TimeSpan total = _isMidiMode ? _midiPlayer.TotalTime : _audioPlayer.TotalTime;
+            string timeStr = $"{current:mm\\:ss}/{total:mm\\:ss}";
+
+            _grid.SetCursorPosition(0, 3);
+
+            void Segment(string text, ConsoleColor color)
+            {
+                _grid.ForegroundColor = color;
+                _grid.Write(text);
+            }
+
+            Segment($" {timeStr}  ", ConsoleColor.Cyan);
+            Segment($"Vol:{_volume,3}%  ", ConsoleColor.Cyan);
+
+            if (_isMidiMode)
+            {
+                Segment(_midiPlayer.DrumsEnabled ? "D+  " : "D-  ", ConsoleColor.Cyan);
+            }
+
+            if (_tuning.Active)
+            {
+                Segment(_tuning.Describe().Trim() + "  ", ConsoleColor.Yellow);
+            }
+
+            if (_isMidiMode && _midiPlayer.AjiEnabled)
+            {
+                string ajiText = _midiPlayer.AjiAvailable
+                    ? $"AJI {PS150.Core.AjiPlanner.TemperamentLabel}: {_midiPlayer.AjiStatusText}"
+                    : "AJI: bez analyzy";
+                Segment(ajiText + "  ", ConsoleColor.Cyan);
+            }
+
+            if (!_isMidiMode && _audioPlayer.UsesNetwork)
+            {
+                Segment($"Vystup: ASRock {_audioPlayer.NetworkLatencyMs}ms  ", ConsoleColor.Green);
+            }
+
+            _grid.ResetColor();
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
         }
 
         /// <summary>
@@ -856,7 +1022,6 @@ namespace PS150.UI.Windows
         /// </summary>
         private void RenderStatusArea()
         {
-            bool showAudioMeters = !_isMidiMode;
             bool showOrganPanel = App.Input?.IsLiveDeviceConnected ?? false;
 
             int[] usedChannels = Array.Empty<int>();
@@ -889,66 +1054,20 @@ namespace PS150.UI.Windows
                 }
             }
 
-            // NOVÉ: řádek s laděním (jen když je aktivní) a při zadávání
-            // ještě dva řádky: vstupní pole a nápověda / chyba.
-            bool showAji = _isMidiMode && _midiPlayer.AjiEnabled;
-            bool showNet = !_isMidiMode && _audioPlayer.UsesNetwork;
-            int tuningRows = (_tuning.Active ? 1 : 0) + (_tuningInputActive ? 2 : 0) + (showAji ? 1 : 0) + (showNet ? 1 : 0);
+            // Čas, hlasitost, ladění, AJI a výstup jsou už v řádku 3 záhlaví
+            // (viz RenderDashboard). Tady zbývá jen zadávání ladění (po INSERT:
+            // vstupní pole a nápověda / chyba), varhanní panel a MIDI osnovy.
+            int tuningRows = _tuningInputActive ? 2 : 0;
 
-            int totalRows = (showAudioMeters ? 2 : 0) + tuningRows + (showOrganPanel ? 5 : 0) + staffRows;
-            if (EnsureRows(_contentStartRow + totalRows))
+            int totalRows = tuningRows + (showOrganPanel ? 5 : 0) + staffRows;
+            if (EnsureRows(HeaderRows + totalRows))
             {
                 RenderDashboard();
             }
 
-            _grid.SetCursorPosition(0, _contentStartRow);
+            _grid.SetCursorPosition(0, HeaderRows);
 
             const int barWidth = 14;
-
-            if (showAudioMeters)
-            {
-                string barL = AudioMeter.RenderBar(_leftDb, barWidth);
-                _grid.Write(" L:[");
-                _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.Write(barL);
-                _grid.ResetColor();
-                _grid.WriteLine(TextLayout.FitWidth($"]{_leftDb,5:F1}dB", Cols - 4 - barWidth));
-
-                string barR = AudioMeter.RenderBar(_rightDb, barWidth);
-                _grid.Write(" R:[");
-                _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.Write(barR);
-                _grid.ResetColor();
-                _grid.WriteLine(TextLayout.FitWidth($"]{_rightDb,5:F1}dB", Cols - 4 - barWidth));
-            }
-
-            // NOVÉ: řádek ladění (T = transpozice v půltónech, A = referenční A4
-            // v Hz, vpravo výsledná odchylka v centech) - jen když je ladění aktivní.
-            if (_tuning.Active)
-            {
-                _grid.ForegroundColor = ConsoleColor.Yellow;
-                _grid.WriteLine(TextLayout.FitWidth(_tuning.Describe(), Cols));
-                _grid.ResetColor();
-            }
-
-            // NOVÉ: řádek o výstupu - hraje se na externí zvukovku po síti.
-            if (showNet)
-            {
-                _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.WriteLine(TextLayout.FitWidth($" Vystup: ASRock {_audioPlayer.NetworkLatencyMs}ms", Cols));
-                _grid.ResetColor();
-            }
-
-            // NOVÉ: řádek AJI - ladění a aktuálně zjištěná tónina.
-            if (showAji)
-            {
-                _grid.ForegroundColor = ConsoleColor.Cyan;
-                string ajiText = _midiPlayer.AjiAvailable
-                    ? $" AJI {PS150.Core.AjiPlanner.TemperamentLabel}: {_midiPlayer.AjiStatusText}"
-                    : " AJI: bez analyzy";
-                _grid.WriteLine(TextLayout.FitWidth(ajiText, Cols));
-                _grid.ResetColor();
-            }
 
             // NOVÉ: zadávání hodnoty ladění (po klávese INSERT).
             if (_tuningInputActive)

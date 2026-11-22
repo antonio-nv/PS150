@@ -18,6 +18,10 @@ namespace PS150.Core
 
         // NOVÉ: AJI (adaptivní čisté ladění .mid souborů, klávesa a) zapnuto/vypnuto.
         public bool AjiEnabled { get; set; } = false;
+
+        // NOVÉ: okno přehrávače otočené o 90 stupňů (klávesa r).
+        public bool Rotated90 { get; set; } = false;
+
         public string? LastFolderPath { get; set; }
         public string? LastFilePath { get; set; }
         public long LastPositionMs { get; set; } = 0;
