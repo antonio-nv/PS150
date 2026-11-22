@@ -47,6 +47,10 @@ namespace PS150.UI.Windows
 
         private int _lastDesiredRows = -1;
 
+        // NOVÉ: je okno aktivní? (řídí barvu titulku, viz Activated/Deactivated)
+        private bool _windowActive = true;
+        private const int StaffColumns = 4;   // NOVÉ: kanálů MIDI osnov vedle sebe v jednom řádku
+
         private readonly TextGridControl _grid;
         private readonly DispatcherTimer _tickTimer = new() { Interval = TimeSpan.FromMilliseconds(30) };
 
@@ -108,6 +112,10 @@ namespace PS150.UI.Windows
 
             // NOVÉ: otočení o 90 stupňů uložené z minula (klávesa r).
             ApplyRotation(_settings.Rotated90);
+
+            // NOVÉ: změna barvy titulku podle aktivity okna
+            Activated += (s, e) => { _windowActive = true; RenderDashboard(); _grid.Redraw(); };
+            Deactivated += (s, e) => { _windowActive = false; RenderDashboard(); _grid.Redraw(); };
 
             // NOVÉ: ladění uložené z minula (settings.json) se hned použije,
             // než se načte první soubor.
@@ -282,13 +290,13 @@ namespace PS150.UI.Windows
         }
 
         /// <summary>
-        /// Otočí celý obsah o 90 stupňů (po směru hodinových ručiček). LayoutTransform
+        /// Otočí celý obsah o 90 stupňů (o -90 stupňů, proti směru hodinových ručiček - sloupce VU metrů pak rostou zespodu nahoru). LayoutTransform
         /// otočí i rozměry, takže se okno samo přizpůsobí (SizeToContent se po
         /// přepnutí na Manual a zpět přepočítá).
         /// </summary>
         private void ApplyRotation(bool rotated)
         {
-            RotationHost.LayoutTransform = rotated ? new RotateTransform(90) : Transform.Identity;
+            RotationHost.LayoutTransform = rotated ? new RotateTransform(-90) : Transform.Identity;
 
             SizeToContent = SizeToContent.Manual;
             SizeToContent = SizeToContent.WidthAndHeight;
@@ -313,9 +321,27 @@ namespace PS150.UI.Windows
             if (Top + ActualHeight > bottom) Top = Math.Max(top, bottom - ActualHeight);
         }
 
+        /// <summary>Uloží polohu okna do položky pro aktuální (vodorovný / svislý) režim.</summary>
+        private void StoreWindowPosition()
+        {
+            if (_settings.Rotated90)
+            {
+                _settings.RotatedWindowX = (int)Left;
+                _settings.RotatedWindowY = (int)Top;
+            }
+            else
+            {
+                _settings.WindowX = (int)Left;
+                _settings.WindowY = (int)Top;
+            }
+        }
+
         private void RestoreWindowPosition()
         {
-            if (!_settings.WindowX.HasValue || !_settings.WindowY.HasValue) return;
+            // NOVÉ: poloha se pamatuje zvlášť pro vodorovný a svislý režim.
+            int? posX = _settings.Rotated90 ? _settings.RotatedWindowX : _settings.WindowX;
+            int? posY = _settings.Rotated90 ? _settings.RotatedWindowY : _settings.WindowY;
+            if (!posX.HasValue || !posY.HasValue) return;
 
             double vLeft = SystemParameters.VirtualScreenLeft;
             double vTop = SystemParameters.VirtualScreenTop;
@@ -326,15 +352,15 @@ namespace PS150.UI.Windows
             // chytit - stejná kontrola jako dřív ve VgaEngine.Run().
             const int minVisible = 50;
             bool withinBounds =
-                _settings.WindowX.Value >= vLeft - minVisible &&
-                _settings.WindowX.Value <= vLeft + vWidth - minVisible &&
-                _settings.WindowY.Value >= vTop &&
-                _settings.WindowY.Value <= vTop + vHeight - minVisible;
+                posX.Value >= vLeft - minVisible &&
+                posX.Value <= vLeft + vWidth - minVisible &&
+                posY.Value >= vTop &&
+                posY.Value <= vTop + vHeight - minVisible;
 
             if (withinBounds)
             {
-                Left = _settings.WindowX.Value;
-                Top = _settings.WindowY.Value;
+                Left = posX.Value;
+                Top = posY.Value;
             }
         }
 
@@ -342,8 +368,7 @@ namespace PS150.UI.Windows
         {
             _tickTimer.Stop();
 
-            _settings.WindowX = (int)Left;
-            _settings.WindowY = (int)Top;
+            StoreWindowPosition();
 
             string? lastFile = HandoffFile ?? _navigator.CurrentFile;
             if (!string.IsNullOrEmpty(lastFile))
@@ -703,9 +728,11 @@ namespace PS150.UI.Windows
 
                 case Key.R:
                     // NOVÉ: otočit okno o 90 stupňů / zpět (nastavení se pamatuje)
+                    StoreWindowPosition();                 // poloha starého režimu
                     _settings.Rotated90 = !_settings.Rotated90;
-                    _settings.Save();
                     ApplyRotation(_settings.Rotated90);
+                    RestoreWindowPosition();               // poloha nového režimu (je-li uložená)
+                    _settings.Save();
                     break;
 
                 case Key.Insert:
@@ -855,12 +882,18 @@ namespace PS150.UI.Windows
 
             // ============ Řádek 0: titulek okna + transportní tlačítka + [_] [X] ============
             // (souřadnice tlačítek viz AddTransportButtons a Window_MouseLeftButtonDown)
+            // NOVÉ: barva titulku podle toho, zda je okno aktivní (světle modrá),
+            // nebo neaktivní (šedá).
+            ConsoleColor titleBg = _windowActive ? ConsoleColor.Cyan : ConsoleColor.DarkGray;
+            ConsoleColor titleFg = _windowActive ? ConsoleColor.Black : ConsoleColor.Gray;
+            ConsoleColor btnFg = _windowActive ? ConsoleColor.DarkBlue : ConsoleColor.Gray;
+
             _grid.SetCursorPosition(0, 0);
-            _grid.BackgroundColor = ConsoleColor.DarkBlue;
-            _grid.ForegroundColor = ConsoleColor.White;
+            _grid.BackgroundColor = titleBg;
+            _grid.ForegroundColor = titleFg;
             _grid.Write(" ♪♫ PS150 Player".PadRight(TransportCol));
 
-            _grid.ForegroundColor = ConsoleColor.Yellow;
+            _grid.ForegroundColor = btnFg;
             _grid.Write("[<<]");
             _grid.Write(" ");
 
@@ -872,10 +905,10 @@ namespace PS150.UI.Windows
             }
             else
             {
-                _grid.ForegroundColor = ConsoleColor.Gray;
+                _grid.ForegroundColor = btnFg;
                 _grid.Write("[►]");
             }
-            _grid.BackgroundColor = ConsoleColor.DarkBlue;
+            _grid.BackgroundColor = titleBg;
             _grid.Write(" ");
 
             if (_isPaused || !isActuallyPlaying)
@@ -886,25 +919,25 @@ namespace PS150.UI.Windows
             }
             else
             {
-                _grid.ForegroundColor = ConsoleColor.Gray;
+                _grid.ForegroundColor = btnFg;
                 _grid.Write("[▄]");
             }
-            _grid.BackgroundColor = ConsoleColor.DarkBlue;
+            _grid.BackgroundColor = titleBg;
 
-            _grid.ForegroundColor = ConsoleColor.Yellow;
+            _grid.ForegroundColor = btnFg;
             _grid.Write(" [>>]");
 
             // zbytek titulku modrý až k tlačítkům [_] [X] na pravém okraji
-            _grid.ForegroundColor = ConsoleColor.White;
+            _grid.ForegroundColor = titleFg;
             _grid.Write(new string(' ', Math.Max(0, Cols - 9 - _grid.CursorX)));
             _grid.Write(" ");
-            _grid.ForegroundColor = ConsoleColor.Gray;
+            _grid.ForegroundColor = btnFg;
             _grid.Write("[_]");
             _grid.Write(" ");
             _grid.BackgroundColor = ConsoleColor.DarkRed;
             _grid.ForegroundColor = ConsoleColor.White;
             _grid.Write("[X]");
-            _grid.BackgroundColor = ConsoleColor.DarkBlue;
+            _grid.BackgroundColor = titleBg;
             _grid.Write(" ");
             _grid.ResetColor();
             _grid.WriteLine();
@@ -1050,7 +1083,7 @@ namespace PS150.UI.Windows
                 else
                 {
                     seekDiagnostic = _midiPlayer.LastSeekDiagnostic;
-                    staffRows = Math.Max(usedChannels.Length, 1) + (string.IsNullOrEmpty(seekDiagnostic) ? 0 : 1);
+                    staffRows = Math.Max((usedChannels.Length + StaffColumns - 1) / StaffColumns, 1) + (string.IsNullOrEmpty(seekDiagnostic) ? 0 : 1);
                 }
             }
 
@@ -1156,8 +1189,13 @@ namespace PS150.UI.Windows
                             g => g.Key,
                             g => g.OrderBy(n => n.Note).ToArray());
 
-                    foreach (int channel in usedChannels)
+                    // NOVÉ: osnovy kanálů jsou po čtveřicích vedle sebe v jednom řádku
+                    // (121 sloupců = 4 x 30 + 1), každá čtvrtina má štítek kanálu a noty.
+                    int cellWidth = Cols / StaffColumns;   // 30
+
+                    for (int k = 0; k < usedChannels.Length; k++)
                     {
+                        int channel = usedChannels[k];
                         string channelLabel = channel == 9 ? "D10" : $"C{channel + 1:D2}";
                         bool isDrumChannel = channel == 9;
                         string notes = notesByChannel.TryGetValue(channel, out var noteEntries)
@@ -1170,8 +1208,13 @@ namespace PS150.UI.Windows
                         _grid.ForegroundColor = ConsoleColor.White;
                         _grid.Write(label);
                         _grid.ForegroundColor = ConsoleColor.Green;
-                        _grid.WriteLine(TextLayout.FitWidth(notes, Cols - label.Length));
+                        _grid.Write(TextLayout.FitWidth(notes, cellWidth - label.Length));
                         _grid.ResetColor();
+
+                        if (k % StaffColumns == StaffColumns - 1 || k == usedChannels.Length - 1)
+                        {
+                            _grid.WriteLine();
+                        }
                     }
 
                     if (usedChannels.Length == 0)

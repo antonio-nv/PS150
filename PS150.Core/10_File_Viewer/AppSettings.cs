@@ -35,6 +35,11 @@ namespace PS150.Core
         public int? WindowX { get; set; }
         public int? WindowY { get; set; }
 
+        // NOVÉ: poloha okna ve svislém (otočeném) režimu - pamatuje se zvlášť
+        // od vodorovného (WindowX/WindowY).
+        public int? RotatedWindowX { get; set; }
+        public int? RotatedWindowY { get; set; }
+
         private static string SettingsFilePath =>
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json");
 
