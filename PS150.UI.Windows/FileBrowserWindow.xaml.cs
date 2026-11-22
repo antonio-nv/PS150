@@ -105,7 +105,10 @@ namespace PS150.UI.Windows
             _midiPlayer.SetTuning(_tuning);
             _audioPlayer.SetSpeedFactor(_tuning.SpeedFactor);
 
-            _grid = new TextGridControl(Cols, 20);
+            // NOVÉ: AJI uložené z minula (klávesa a).
+            _midiPlayer.SetAjiEnabled(_settings.AjiEnabled);
+
+            _grid =new TextGridControl(Cols, 20);
             Canvas.SetLeft(_grid, 0);
             Canvas.SetTop(_grid, 0);
             RootCanvas.Children.Add(_grid);
@@ -567,6 +570,15 @@ namespace PS150.UI.Windows
                     ApplyTuning(_tuning.WithActive(!_tuning.Active));
                     break;
 
+                case Key.A:
+                    // NOVÉ: AJI (adaptivní čisté ladění) zapnout/vypnout za chodu.
+                    // Týká se jen .mid souborů; nastavení se uloží.
+                    _midiPlayer.SetAjiEnabled(!_midiPlayer.AjiEnabled);
+                    _settings.AjiEnabled = _midiPlayer.AjiEnabled;
+                    _settings.Save();
+                    _grid.Clear();
+                    break;
+
                 case Key.Insert:
                     // NOVÉ: zadání hodnoty ladění (zároveň ladění zapne)
                     BeginTuningInput();
@@ -839,7 +851,8 @@ namespace PS150.UI.Windows
 
             // NOVÉ: řádek s laděním (jen když je aktivní) a při zadávání
             // ještě dva řádky: vstupní pole a nápověda / chyba.
-            int tuningRows = (_tuning.Active ? 1 : 0) + (_tuningInputActive ? 2 : 0);
+            bool showAji = _isMidiMode && _midiPlayer.AjiEnabled;
+            int tuningRows = (_tuning.Active ? 1 : 0) + (_tuningInputActive ? 2 : 0) + (showAji ? 1 : 0);
 
             int totalRows = (showAudioMeters ? 2 : 0) + tuningRows + (showOrganPanel ? 5 : 0) + staffRows;
             if (EnsureRows(_contentStartRow + totalRows))
@@ -874,6 +887,17 @@ namespace PS150.UI.Windows
             {
                 _grid.ForegroundColor = ConsoleColor.Yellow;
                 _grid.WriteLine(TextLayout.FitWidth(_tuning.Describe(), Cols));
+                _grid.ResetColor();
+            }
+
+            // NOVÉ: řádek AJI - ladění a aktuálně zjištěná tónina.
+            if (showAji)
+            {
+                _grid.ForegroundColor = ConsoleColor.Cyan;
+                string ajiText = _midiPlayer.AjiAvailable
+                    ? $" AJI {PS150.Core.AjiPlanner.TemperamentLabel}: {_midiPlayer.AjiStatusText}"
+                    : " AJI: bez analyzy";
+                _grid.WriteLine(TextLayout.FitWidth(ajiText, Cols));
                 _grid.ResetColor();
             }
 

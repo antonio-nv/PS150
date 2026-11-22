@@ -15,6 +15,9 @@ namespace PS150.Core
         public bool TuningActive { get; set; } = false;
         public double TuningTransposeSemitones { get; set; } = 0.0;
         public double TuningReferenceA4Hz { get; set; } = 440.0;
+
+        // NOVÉ: AJI (adaptivní čisté ladění .mid souborů, klávesa a) zapnuto/vypnuto.
+        public bool AjiEnabled { get; set; } = false;
         public string? LastFolderPath { get; set; }
         public string? LastFilePath { get; set; }
         public long LastPositionMs { get; set; } = 0;

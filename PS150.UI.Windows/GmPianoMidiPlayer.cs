@@ -121,6 +121,314 @@ namespace PS150.UI.Windows
         // Používá se jen z přehrávacího vlákna.
         private readonly Dictionary<(int Channel, int Note), int> _sentNotes = new();
 
+        // ------------------------------------------------------------------
+        // NOVÉ: AJI (adaptivní čisté ladění, klávesa a ve FileBrowserWindow).
+        //
+        // Při načtení souboru se předem spočítá plán (PS150.Core.AjiPlanner):
+        // tónina skladby a pro každou notu kanál + pitch bend, aby zněla
+        // v čistém ladění vůči tónice. Přehrávač pak jen podle vypínače
+        // zahraje buď původní noty (temperovaný klavír, jako dřív), nebo
+        // noty z plánu. Přepnutí je okamžité, nota, která už zní, doznívá
+        // po svém.
+        //
+        // Pozor: pedál (CC64) se při zapnutém AJI nepředává syntezátoru,
+        // ale emuluje se tady (_pedalDown / _pedalHeld) - noty z jednoho
+        // kanálu souboru se totiž rozdělují na víc skutečných kanálů, takže
+        // pedál syntezátoru by držel špatné noty. Ostatní kontrolery se
+        // předávají beze změny (volume, pan a program se řídí jinde, viz výše).
+        // ------------------------------------------------------------------
+        private volatile bool _ajiEnabled = false;
+        private volatile PS150.Core.AjiPlan? _ajiPlan;
+        private readonly object _ajiLock = new object();
+
+        // Právě znějící noty zahrané přes AJI: (kanál ze souboru, nota ze souboru) -> (skutečný kanál, skutečná nota).
+        private readonly Dictionary<(int OrigChannel, int OrigNote), (int PoolChannel, int SentNote)> _ajiActive = new();
+
+        // Pedál podle kanálů ze souboru + noty, které pedál drží i po NoteOff.
+        private readonly bool[] _pedalDown = new bool[16];
+        private readonly List<(int OrigChannel, int OrigNote)>[] _pedalHeld = CreateHeldLists();
+
+        // Naposledy poslané nastavení skutečných kanálů (aby se zbytečně neposílalo znovu). -1 / NaN = neznámé.
+        private readonly int[] _poolPan = Enumerable.Repeat(-1, 16).ToArray();
+        private readonly double[] _poolBend = Enumerable.Repeat(double.NaN, 16).ToArray();
+
+        // Pitch bend přímo ze souboru (bez ladění a AJI) - pro zobrazení not a pro návrat z AJI.
+        private readonly double[] _fileBendCents = new double[16];
+
+        private static List<(int OrigChannel, int OrigNote)>[] CreateHeldLists()
+        {
+            var lists = new List<(int OrigChannel, int OrigNote)>[16];
+            for (int i = 0; i < lists.Length; i++) lists[i] = new List<(int OrigChannel, int OrigNote)>();
+            return lists;
+        }
+
+        /// <summary>True, pokud je AJI zapnuté.</summary>
+        public bool AjiEnabled => _ajiEnabled;
+
+        /// <summary>True, pokud se pro aktuální soubor podařilo spočítat plán AJI.</summary>
+        public bool AjiAvailable => _ajiPlan != null;
+
+        /// <summary>Text pro obrazovku: tónina platná v aktuálním čase přehrávání (např. "Fis dur").</summary>
+        public string AjiStatusText
+        {
+            get
+            {
+                var plan = _ajiPlan;
+                if (plan == null) return "bez analýzy";
+                return plan.DescribeKeyAt(CurrentTime.TotalSeconds);
+            }
+        }
+
+        /// <summary>
+        /// Zapne / vypne AJI za chodu. Noty, které už znějí, nechá doznít;
+        /// nové noty se zahrají podle nového nastavení.
+        /// </summary>
+        public void SetAjiEnabled(bool enabled)
+        {
+            lock (_ajiLock)
+            {
+                if (_ajiEnabled == enabled) return;
+                _ajiEnabled = enabled;
+
+                // Naposledy poslané nastavení skutečných kanálů už nemusí platit.
+                Array.Fill(_poolPan, -1);
+                Array.Fill(_poolBend, double.NaN);
+
+                if (enabled)
+                {
+                    // Od teď pedál emulujeme sami - syntezátoru ho proto nejdřív uvolníme na všech
+                    // kanálech, aby mu žádná dřívější noha "nezůstala dole".
+                    for (int channel = 0; channel <= 15; channel++)
+                    {
+                        if (channel != PercussionChannel) SendControl(channel, 64, 0);
+                    }
+                }
+                else
+                {
+                    // Noty držené naším pedálem pustíme a vrátíme kanálům pitch bend ze souboru.
+                    for (int channel = 0; channel <= 15; channel++)
+                    {
+                        ReleasePedalHeld(channel);
+                    }
+
+                    for (int channel = 0; channel <= 15; channel++)
+                    {
+                        _channelBendCents[channel] = _fileBendCents[channel];
+                    }
+
+                    ReassertChannelState();
+
+                    // Pedál podle skutečného stavu v souboru zase předáme syntezátoru.
+                    for (int channel = 0; channel <= 15; channel++)
+                    {
+                        if (channel != PercussionChannel && _pedalDown[channel]) SendControl(channel, 64, 127);
+                    }
+                }
+            }
+        }
+
+        /// <summary>Vynuluje veškerý stav AJI (nový soubor). Plán samotný se nastavuje zvlášť.</summary>
+        private void ResetAjiState()
+        {
+            lock (_ajiLock)
+            {
+                _ajiActive.Clear();
+                Array.Clear(_pedalDown, 0, _pedalDown.Length);
+                foreach (var list in _pedalHeld) list.Clear();
+                Array.Fill(_poolPan, -1);
+                Array.Fill(_poolBend, double.NaN);
+                Array.Clear(_fileBendCents, 0, _fileBendCents.Length);
+            }
+        }
+
+        /// <summary>
+        /// Spočítá plán AJI pro právě načtený soubor (jednou, hned po načtení).
+        /// Při jakékoliv chybě plán prostě nebude (AJI se pak chová jako
+        /// vypnuté) - přehrávání samotné se kvůli tomu nikdy nesmí zastavit.
+        /// </summary>
+        private void BuildAjiPlan(MidiFile midiFile, int[] usedChannels)
+        {
+            _ajiPlan = null;
+
+            try
+            {
+                var tempoMap = midiFile.GetTempoMap();
+
+                var noteInputs = new List<PS150.Core.AjiNoteInput>();
+                foreach (Note note in midiFile.GetNotes())
+                {
+                    double start = ((TimeSpan)note.TimeAs<MetricTimeSpan>(tempoMap)).TotalSeconds;
+                    double end = ((TimeSpan)note.EndTimeAs<MetricTimeSpan>(tempoMap)).TotalSeconds;
+                    noteInputs.Add(new PS150.Core.AjiNoteInput(note.Channel, note.NoteNumber, start, end));
+                }
+
+                var pedalInputs = new List<PS150.Core.AjiPedalInput>();
+                foreach (TimedEvent timedEvent in midiFile.GetTimedEvents())
+                {
+                    if (timedEvent.Event is ControlChangeEvent cc && cc.ControlNumber == 64)
+                    {
+                        double time = ((TimeSpan)timedEvent.TimeAs<MetricTimeSpan>(tempoMap)).TotalSeconds;
+                        pedalInputs.Add(new PS150.Core.AjiPedalInput(cc.Channel, time, cc.ControlValue >= 64));
+                    }
+                }
+
+                // Panorámu zdědí každá nota z kanálu souboru - stejné ping-pong pravidlo jako v ApplyPanLayout.
+                int[] panByChannel = Enumerable.Repeat(PanCenter, 16).ToArray();
+                if (usedChannels.Length > 1)
+                {
+                    for (int i = 0; i < usedChannels.Length; i++)
+                    {
+                        panByChannel[usedChannels[i]] = (i % 2 == 0) ? PanLeft : PanRight;
+                    }
+                }
+
+                _ajiPlan = PS150.Core.AjiPlanner.Build(noteInputs, pedalInputs, panByChannel);
+            }
+            catch (Exception ex)
+            {
+                _ajiPlan = null;
+                System.Diagnostics.Debug.WriteLine($"[GmPianoMidiPlayer] AJI plán se nepodařilo spočítat: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Zahraje notu podle plánu AJI. Vrací false, pokud se AJI nepoužije
+        /// (vypnuto, bicí, žádný plán, nota v plánu není) - přehrávač pak
+        /// zahraje notu normálně (temperovaně).
+        /// </summary>
+        private bool AjiHandleNoteOn(NoteOnEvent noteOn)
+        {
+            if (!_ajiEnabled) return false;
+
+            var plan = _ajiPlan;
+            var device = _outputDevice;
+            int channel = noteOn.Channel;
+            int note = noteOn.NoteNumber;
+
+            if (plan == null || device == null || channel == PercussionChannel || noteOn.Velocity == 0) return false;
+
+            if (!plan.TryGetNote(channel, note, CurrentTime.TotalSeconds, PS150.Core.AjiPlanner.MatchToleranceSeconds, out var notePlan)
+                || notePlan == null)
+            {
+                return false;
+            }
+
+            lock (_ajiLock)
+            {
+                // Stejná nota se znovu rozeznívá, než předchozí skončila - tu starou nejdřív vypneme.
+                if (_ajiActive.TryGetValue((channel, note), out var previous))
+                {
+                    SendNoteOffRaw(device, previous.PoolChannel, previous.SentNote, 0);
+                    _ajiActive.Remove((channel, note));
+                }
+
+                int pool = notePlan.PoolChannel;
+
+                if (_poolPan[pool] != notePlan.Pan)
+                {
+                    SendControl(pool, PanControlNumber, notePlan.Pan);
+                    _poolPan[pool] = notePlan.Pan;
+                }
+
+                if (double.IsNaN(_poolBend[pool]) || Math.Abs(_poolBend[pool] - notePlan.OffsetCents) > 0.001)
+                {
+                    _poolBend[pool] = notePlan.OffsetCents;
+                    _channelBendCents[pool] = notePlan.OffsetCents;
+                    SendBend(pool);
+                }
+
+                int sentNote = note + _tuning.WholeSemitones;
+                if (sentNote < 0 || sentNote > 127) return true;   // mimo rozsah - nezahraje se
+
+                device.SendEvent(new NoteOnEvent((SevenBitNumber)sentNote, noteOn.Velocity)
+                {
+                    Channel = (FourBitNumber)pool
+                });
+
+                _ajiActive[(channel, note)] = (pool, sentNote);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Vypne notu zahranou přes AJI (a respektuje emulovaný pedál).
+        /// Vrací false, pokud nota přes AJI nezněla - pak ji vypne běžná cesta.
+        /// </summary>
+        private bool AjiHandleNoteOff(NoteOffEvent noteOff)
+        {
+            int channel = noteOff.Channel;
+            int note = noteOff.NoteNumber;
+
+            lock (_ajiLock)
+            {
+                if (!_ajiActive.ContainsKey((channel, note))) return false;
+
+                if (_ajiEnabled && _pedalDown[channel])
+                {
+                    _pedalHeld[channel].Add((channel, note));
+                    return true;
+                }
+
+                AjiSendNoteOff(channel, note, noteOff.Velocity);
+            }
+
+            return true;
+        }
+
+        private void AjiSendNoteOff(int origChannel, int origNote, int velocity)
+        {
+            if (!_ajiActive.TryGetValue((origChannel, origNote), out var active)) return;
+            _ajiActive.Remove((origChannel, origNote));
+
+            var device = _outputDevice;
+            if (device != null) SendNoteOffRaw(device, active.PoolChannel, active.SentNote, velocity);
+        }
+
+        private static void SendNoteOffRaw(OutputDevice device, int channel, int note, int velocity)
+        {
+            device.SendEvent(new NoteOffEvent((SevenBitNumber)note, (SevenBitNumber)velocity)
+            {
+                Channel = (FourBitNumber)channel
+            });
+        }
+
+        /// <summary>Pustí noty, které držel emulovaný pedál daného kanálu.</summary>
+        private void ReleasePedalHeld(int channel)
+        {
+            var held = _pedalHeld[channel];
+            if (held.Count == 0) return;
+
+            foreach (var (origChannel, origNote) in held.ToArray())
+            {
+                AjiSendNoteOff(origChannel, origNote, 0);
+            }
+            held.Clear();
+        }
+
+        /// <summary>
+        /// Pedál (CC64) ze souboru. Stav se sleduje vždy; při vypnutém AJI se
+        /// zároveň předá syntezátoru (jako dřív), při zapnutém ho emulujeme.
+        /// </summary>
+        private void HandlePedal(ControlChangeEvent pedal)
+        {
+            int channel = pedal.Channel;
+            bool down = pedal.ControlValue >= 64;
+
+            lock (_ajiLock)
+            {
+                _pedalDown[channel] = down;
+
+                if (!_ajiEnabled)
+                {
+                    _outputDevice?.SendEvent(pedal);
+                    return;
+                }
+
+                if (!down) ReleasePedalHeld(channel);
+            }
+        }
+
         /// <summary>
         /// Nastaví ladění a hned ho promítne do pitch bendu všech kanálů.
         /// Noty, které už znějí, si nechají původní číslo noty (jen se jim
@@ -314,6 +622,12 @@ namespace PS150.UI.Windows
             _sentNotes.Clear();
             SendTuningBendToAllChannels();
 
+            // NOVÉ: AJI. Zapomene stav z předchozího souboru a předem spočítá
+            // plán pro tenhle (tónina + rozdělení not na kanály, viz AjiPlanner).
+            // Trvá to jen okamžik a při chybě se prostě bez AJI pokračuje.
+            ResetAjiState();
+            BuildAjiPlan(midiFile, usedChannels);
+
             _playbackTask = Task.Run(() =>
             {
                 try
@@ -333,6 +647,11 @@ namespace PS150.UI.Windows
 
                             case ControlChangeEvent panCc when panCc.ControlNumber == PanControlNumber:
                                 // Ignorováno - panorámu řídíme sami (ping-pong), viz výše.
+                                break;
+
+                            case ControlChangeEvent pedalCc when pedalCc.ControlNumber == 64:
+                                // NOVÉ: pedál - při AJI ho emulujeme sami, jinak jde na syntezátor.
+                                HandlePedal(pedalCc);
                                 break;
 
                             case ControlChangeEvent volCc when volCc.ControlNumber == VolumeControlNumber:
@@ -360,6 +679,7 @@ namespace PS150.UI.Windows
                                 // proto zapomeneme bend ze souboru (ReassertChannelState
                                 // níž pak pošle jen jemné doladění z ladění).
                                 Array.Clear(_channelBendCents, 0, _channelBendCents.Length);
+                                Array.Clear(_fileBendCents, 0, _fileBendCents.Length);
                                 ReassertChannelState();
                                 break;
 
@@ -368,6 +688,7 @@ namespace PS150.UI.Windows
                                 _outputDevice.SendEvent(resetCc);
                                 // NOVÉ: CC121 vrací na střed i pitch bend (jen tohoto kanálu).
                                 _channelBendCents[resetCc.Channel] = 0.0;
+                                _fileBendCents[resetCc.Channel] = 0.0;
                                 ReassertChannelState();
                                 break;
 
@@ -383,30 +704,40 @@ namespace PS150.UI.Windows
                                 // ve FileBrowserWindow.xaml.cs). Zvukově se
                                 // pořád posílá beze změny na výstupní zařízení,
                                 // stejně jako dřív přes "default" větev.
-                                _channelBendCents[pitchBend.Channel] =
-                                    (pitchBend.PitchValue - 8192) / 8192.0 * PitchBendRangeCents;
+                                double fileBend = (pitchBend.PitchValue - 8192) / 8192.0 * PitchBendRangeCents;
 
-                                // ZMĚNA: bend ze souboru se zapamatuje (viz výše) a na
-                                // syntezátor se pošle SPOLU s jemným doladěním z klávesy t
-                                // (SendBend je spočítá dohromady). Bicí (D10) se neladí,
-                                // těm jde bend ze souboru beze změny.
+                                // NOVÉ: bend přímo ze souboru se pamatuje zvlášť (pro zobrazení
+                                // not a pro návrat z AJI) - _channelBendCents je naopak to,
+                                // co se právě posílá syntezátoru.
+                                _fileBendCents[pitchBend.Channel] = fileBend;
+
+                                // ZMĚNA: bend ze souboru se na syntezátor pošle SPOLU s jemným
+                                // doladěním z klávesy t (SendBend je spočítá dohromady). Bicí
+                                // (D10) se neladí, těm jde bend ze souboru beze změny. Při
+                                // zapnutém AJI se bend ze souboru neposílá vůbec: kanály
+                                // syntezátoru teď patří plánu AJI a bend by ho rozladil.
                                 if (pitchBend.Channel == PercussionChannel)
+                                {
                                     _outputDevice.SendEvent(pitchBend);
-                                else
+                                }
+                                else if (!_ajiEnabled)
+                                {
+                                    _channelBendCents[pitchBend.Channel] = fileBend;
                                     SendBend(pitchBend.Channel);
+                                }
                                 break;
 
                             case NoteOnEvent noteOn:
                                 if (noteOn.Channel == PercussionChannel && !_drumsEnabled) break;
-                                SendTunedNoteOn(noteOn);
+                                if (!AjiHandleNoteOn(noteOn)) SendTunedNoteOn(noteOn);
                                 // Zobrazení dostává ORIGINÁLNÍ notu ze souboru (notová
                                 // osnova se tím nemění, ladění ukazuje samostatný řádek).
-                                NoteOnRaised?.Invoke(noteOn.Channel, noteOn.NoteNumber, _channelBendCents[noteOn.Channel]);
+                                NoteOnRaised?.Invoke(noteOn.Channel, noteOn.NoteNumber, _fileBendCents[noteOn.Channel]);
                                 break;
 
                             case NoteOffEvent noteOff:
                                 if (noteOff.Channel == PercussionChannel && !_drumsEnabled) break;
-                                SendTunedNoteOff(noteOff);
+                                if (!AjiHandleNoteOff(noteOff)) SendTunedNoteOff(noteOff);
                                 NoteOffRaised?.Invoke(noteOff.Channel, noteOff.NoteNumber);
                                 break;
 
@@ -592,6 +923,11 @@ namespace PS150.UI.Windows
             SendVolumeToAllChannels();
             ApplyPanLayout();
             SendTuningBendToAllChannels();   // NOVÉ: i jemné doladění se po resetu obnoví
+
+            // NOVÉ: panorámu kanálů právě přepsal ApplyPanLayout (a reset mohl vrátit
+            // i bend), takže AJI si při další notě nastavení kanálů pošle znovu.
+            Array.Fill(_poolPan, -1);
+            Array.Fill(_poolBend, double.NaN);
         }
 
         // ------------------------------------------------------------------
