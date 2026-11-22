@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using PS150.Core.Filters;
+using PS150.Core.Input;
 using PS150.Core.Network;
 using PS150.Core.Output;
 
@@ -42,6 +43,10 @@ using PS150.Core.Output;
 //   --auto                  bez klávesnice: projde postupně všechny kanály a skončí
 //   --selftest              spočítá chování výhybky bez zvukové karty a skončí
 //   --nettest               nasimuluje přenos po síti (ztráty, kolísání, drift hodin) a skončí
+//   --receive               VIRTUÁLNÍ ZVUKOVKA: přijímá zvuk z PC po síti, vede ho přes výhybku
+//                           (výšky 0,1, hloubky 2,3) do karty a odpovídá na dotazy přehrávače
+//   --port 5150             UDP port pro příjem (výchozí podle NetworkDefaults)
+//   --delay 30              rezerva proti kolísání sítě v ms (kabel ~20-30, WiFi 60-100)
 // ======================================================================
 
 // ---- NASTAVENÍ NATVRDO ----
@@ -59,6 +64,9 @@ double crossoverHz = DefaultCrossoverHz;
 bool autoMode = false;
 bool selfTest = false;
 bool netTest = false;
+bool receiveMode = false;
+int udpPort = PS150.Core.Network.NetworkDefaults.Port;
+int delayMs = 30;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -72,6 +80,9 @@ for (int i = 0; i < args.Length; i++)
         case "--auto": autoMode = true; break;
         case "--selftest": selfTest = true; break;
         case "--nettest": netTest = true; break;
+        case "--receive": receiveMode = true; break;
+        case "--port" when i + 1 < args.Length: udpPort = int.Parse(args[++i], CultureInfo.InvariantCulture); break;
+        case "--delay" when i + 1 < args.Length: delayMs = int.Parse(args[++i], CultureInfo.InvariantCulture); break;
         default:
             Console.WriteLine($"Neznámý parametr: {args[i]}");
             return 1;
@@ -116,6 +127,11 @@ Console.WriteLine($"Zařízení: {output.DeviceName}, {output.Channels} kanálů
 if (output.Channels <= ChannelLowR)
 {
     Console.WriteLine("Pozor: karta má méně než 4 kanály, výhybka (kanály 0-3) nebude použitelná.");
+}
+
+if (receiveMode)
+{
+    return RunReceiver(output, crossoverHz, delayMs, udpPort);
 }
 
 // ---- sdílený stav mezi klávesnicí a zvukovým vláknem ----
@@ -470,6 +486,183 @@ static void RunSelfTest(int sampleRate, double crossoverHz)
     }
 }
 
+// Virtuální externí zvukovka: zvuk z PC přichází po síti (UDP), jitter buffer ho
+// srovná do pravidelného toku, výhybka ho rozdělí a jde do karty:
+//   výšky L/P -> kanály 0,1   hloubky L/P -> kanály 2,3   (střed zatím nic)
+// Hlasitost začíná na -20 dB, ať první zvuk z PC nepřekvapí zesilovače.
+static int RunReceiver(AlsaOutput card, double startCrossoverHz, int targetDelayMs, int udpPort)
+{
+    int ch = card.Channels;
+    if (ch <= ChannelLowR)
+    {
+        Console.WriteLine("Pro příjem je potřeba karta s alespoň 4 kanály.");
+        card.Dispose();
+        return 4;
+    }
+
+    var jitter = new AudioJitterBuffer(2, card.SampleRate, targetDelayMs);
+    var info = new ReceiverInfo(card.SampleRate, 2, targetDelayMs + card.LatencyMs);
+    var rx = new NetworkAudioInput(udpPort, jitter, info);
+
+    try
+    {
+        rx.Start();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Nepodařilo se otevřít UDP port {udpPort}: {ex.Message}");
+        card.Dispose();
+        return 5;
+    }
+
+    Console.WriteLine($"Příjem na UDP portu {udpPort}, rezerva {targetDelayMs} ms, celkové zpoždění {info.LatencyMs} ms.");
+    Console.WriteLine($"Výhybka {startCrossoverHz:F0} Hz. X = výhybka zap/vyp, , a . = dělicí kmitočet, Doleva/Doprava = hlasitost, Q = konec");
+
+    var st = new ReceiverState { Crossover = true, CrossoverHz = startCrossoverHz, Gain = DbToGain(-20.0) };
+    bool quit = false;
+    string? failure = null;
+
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; quit = true; };
+
+    var worker = new Thread(() =>
+    {
+        try
+        {
+            const int block = 256;
+            var inBuf = new float[block * 2];
+            var outBuf = new float[block * ch];
+            var xo = new StereoCrossover2Way(card.SampleRate, st.CrossoverHz);
+            double applied = st.CrossoverHz;
+            float gain = 0f;
+
+            while (!quit)
+            {
+                jitter.Read(inBuf);   // když nic nepřichází, vrací ticho
+
+                double wanted = st.CrossoverHz;
+                if (wanted != applied)
+                {
+                    xo.SetCrossover(wanted);
+                    applied = wanted;
+                }
+
+                float target = (float)st.Gain;
+                bool useCrossover = st.Crossover;
+
+                Array.Clear(outBuf, 0, outBuf.Length);
+
+                for (int f = 0; f < block; f++)
+                {
+                    gain += (target - gain) * 0.002f;   // plynulá změna hlasitosti (bez lupanců)
+                    float l = inBuf[f * 2] * gain;
+                    float r = inBuf[f * 2 + 1] * gain;
+                    int o = f * ch;
+
+                    if (useCrossover)
+                    {
+                        xo.ProcessFrame(l, r, out float lowL, out float lowR, out float highL, out float highR);
+                        outBuf[o + ChannelHighL] = highL;
+                        outBuf[o + ChannelHighR] = highR;
+                        outBuf[o + ChannelLowL] = lowL;
+                        outBuf[o + ChannelLowR] = lowR;
+                    }
+                    else
+                    {
+                        outBuf[o + ChannelHighL] = l;
+                        outBuf[o + ChannelHighR] = r;
+                    }
+                }
+
+                card.Write(outBuf);   // blokuje tempem karty, tím se čte z bufferu pravidelně
+            }
+        }
+        catch (Exception ex)
+        {
+            failure = ex.Message;
+            quit = true;
+        }
+    })
+    {
+        IsBackground = true,
+        Priority = ThreadPriority.Highest
+    };
+
+    worker.Start();
+
+    bool interactive = !Console.IsInputRedirected;
+    var statusClock = System.Diagnostics.Stopwatch.StartNew();
+
+    while (!quit)
+    {
+        if (statusClock.ElapsedMilliseconds >= 250)
+        {
+            statusClock.Restart();
+            string source = rx.LastAudioAgeMs < 500 ? "vysílá" : "ticho";
+            double db = 20.0 * Math.Log10(Math.Max(st.Gain, 1e-6));
+            string mode = st.Crossover ? $"výhybka {st.CrossoverHz:F0} Hz" : "bez výhybky";
+            Console.Write($"\r  {source,-7} {mode,-18} zaplnění {jitter.FillMs,5:F1} ms  ztraceno {jitter.PacketsLost}  " +
+                          $"pozdě {jitter.PacketsLate}  výpadky {jitter.Underruns}  tempo {jitter.RatePpm,5:F0} ppm  {db,5:F0} dB   ");
+        }
+
+        if (interactive && Console.KeyAvailable)
+        {
+            ConsoleKeyInfo key = Console.ReadKey(true);
+            switch (key.Key)
+            {
+                case ConsoleKey.Q:
+                case ConsoleKey.Escape:
+                    quit = true;
+                    break;
+
+                case ConsoleKey.X:
+                    st.Crossover = !st.Crossover;
+                    break;
+
+                case ConsoleKey.OemComma:
+                    st.CrossoverHz = Math.Max(st.CrossoverHz / Math.Pow(2.0, 1.0 / 12.0), 40.0);
+                    break;
+
+                case ConsoleKey.OemPeriod:
+                    st.CrossoverHz = Math.Min(st.CrossoverHz * Math.Pow(2.0, 1.0 / 12.0), 16000.0);
+                    break;
+
+                case ConsoleKey.RightArrow:
+                case ConsoleKey.Add:
+                case ConsoleKey.OemPlus:
+                    st.Gain = Math.Min(st.Gain * DbToGain(2.0), 1.0);
+                    break;
+
+                case ConsoleKey.LeftArrow:
+                case ConsoleKey.Subtract:
+                case ConsoleKey.OemMinus:
+                    st.Gain = Math.Max(st.Gain * DbToGain(-2.0), DbToGain(-80.0));
+                    break;
+            }
+        }
+        else
+        {
+            Thread.Sleep(30);
+        }
+    }
+
+    Console.WriteLine();
+    quit = true;
+    worker.Join(2000);
+
+    rx.Dispose();
+    int cardUnderruns = card.UnderrunCount;
+    card.Dispose();
+
+    if (failure != null)
+    {
+        Console.WriteLine($"Chyba zvukového vlákna: {failure}");
+        return 3;
+    }
+
+    Console.WriteLine($"Hotovo. Přijato paketů {rx.AudioPackets}, odpovědí na dotazy {rx.ProbesAnswered}, underrun karty {cardUnderruns}.");
+    return 0;
+}
+
 // Simulace přenosu po síti bez sítě: odesílatel posílá sinus 1 kHz v paketech po
 // 128 snímcích. Do cesty vložíme zpoždění s kolísáním (3-15 ms a občas špička 40 ms),
 // 1 % ztracených paketů, přeházené pořadí a rozdíl hodin +100 ppm (odesílatel
@@ -561,6 +754,13 @@ static void RunNetTest(int sampleRate)
 // Stav sdílený mezi klávesnicí (hlavní vlákno) a zvukovým vláknem.
 // Čtení a zápis double je na 64bitových systémech (x64, arm64) nedělitelné,
 // takže tu nejsou potřeba zámky.
+sealed class ReceiverState
+{
+    public volatile bool Crossover;
+    public double CrossoverHz;
+    public double Gain;
+}
+
 sealed class ToneState
 {
     public volatile int Mask;

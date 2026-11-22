@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Linq;
 using System.Text;
 using System.Windows;
@@ -9,6 +10,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using PS150.Core;
+using PS150.Core.Network;
 using PS150.Core.Tones;
 
 namespace PS150.UI.Windows
@@ -53,6 +55,11 @@ namespace PS150.UI.Windows
         // Wavetable Synth) - viz GmPianoMidiPlayer.cs. Úmyslně NEpoužívá
         // PS150.Core.
         private readonly GmPianoMidiPlayer _midiPlayer = new();
+
+        // NOVÉ: hlídá, jestli je na síti externí zvukovka (ASRock / RP5).
+        // Když ano, přehrávač posílá zvuk tam; když ne (nebo zmizela),
+        // hraje na zvukovku počítače. Viz OnReceiverChanged.
+        private AudioReceiverWatcher? _receiverWatcher;
 
         private readonly object _midiNotesLock = new object();
         private readonly Dictionary<(int Channel, int Note), double> _midiActiveNotes = new();
@@ -107,6 +114,20 @@ namespace PS150.UI.Windows
 
             // NOVÉ: AJI uložené z minula (klávesa a).
             _midiPlayer.SetAjiEnabled(_settings.AjiEnabled);
+
+            // NOVÉ: zjišťování externí zvukovky na síti (adresa je natvrdo v
+            // NetworkDefaults). Chyba tady nesmí shodit start přehrávače.
+            try
+            {
+                _receiverWatcher = new AudioReceiverWatcher(NetworkDefaults.ReceiverAddress, NetworkDefaults.Port);
+                _receiverWatcher.Changed += OnReceiverChanged;
+                _receiverWatcher.Start();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[FileBrowserWindow] Hlídání zvukovky se nespustilo: {ex.Message}");
+                _receiverWatcher = null;
+            }
 
             _grid =new TextGridControl(Cols, 20);
             Canvas.SetLeft(_grid, 0);
@@ -250,8 +271,27 @@ namespace PS150.UI.Windows
             }
             _settings.Save();
 
+            // NOVÉ: nejdřív zastavit hlídání sítě, ať už nic nesahá na přehrávač.
+            _receiverWatcher?.Dispose();
+            _receiverWatcher = null;
+
             _audioPlayer.Stop();
+            _audioPlayer.Dispose();
             _midiPlayer.Stop();
+        }
+
+        /// <summary>
+        /// NOVÉ: externí zvukovka se objevila (info) nebo zmizela (null).
+        /// Přichází z vlákna hlídače, proto se přepíná přes Dispatcher.
+        /// </summary>
+        private void OnReceiverChanged(ReceiverInfo? info)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                IPEndPoint? endpoint = info != null ? _receiverWatcher?.Endpoint : null;
+                _audioPlayer.SetNetworkTarget(endpoint, endpoint != null ? info : null);
+                _grid.Clear();
+            }));
         }
 
         private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -852,7 +892,8 @@ namespace PS150.UI.Windows
             // NOVÉ: řádek s laděním (jen když je aktivní) a při zadávání
             // ještě dva řádky: vstupní pole a nápověda / chyba.
             bool showAji = _isMidiMode && _midiPlayer.AjiEnabled;
-            int tuningRows = (_tuning.Active ? 1 : 0) + (_tuningInputActive ? 2 : 0) + (showAji ? 1 : 0);
+            bool showNet = !_isMidiMode && _audioPlayer.UsesNetwork;
+            int tuningRows = (_tuning.Active ? 1 : 0) + (_tuningInputActive ? 2 : 0) + (showAji ? 1 : 0) + (showNet ? 1 : 0);
 
             int totalRows = (showAudioMeters ? 2 : 0) + tuningRows + (showOrganPanel ? 5 : 0) + staffRows;
             if (EnsureRows(_contentStartRow + totalRows))
@@ -887,6 +928,14 @@ namespace PS150.UI.Windows
             {
                 _grid.ForegroundColor = ConsoleColor.Yellow;
                 _grid.WriteLine(TextLayout.FitWidth(_tuning.Describe(), Cols));
+                _grid.ResetColor();
+            }
+
+            // NOVÉ: řádek o výstupu - hraje se na externí zvukovku po síti.
+            if (showNet)
+            {
+                _grid.ForegroundColor = ConsoleColor.Green;
+                _grid.WriteLine(TextLayout.FitWidth($" Vystup: ASRock {_audioPlayer.NetworkLatencyMs}ms", Cols));
                 _grid.ResetColor();
             }
 

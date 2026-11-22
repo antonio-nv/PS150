@@ -1,12 +1,21 @@
 ﻿using System;
+using System.Net;
+using System.Threading;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using PS150.Core.Network;
+using PS150.Core.Output;
 
 namespace PS150.UI.Windows
 {
     public class AudioPlayer : IDisposable
     {
-        private WasapiOut? _wasapiOut;
+        // ZMĚNA: místo přímo WasapiOut je výstup "trasa" (IAudioRoute) - buď
+        // zvuková karta počítače (WASAPI), nebo síť (externí zvukovka, viz
+        // SetNetworkTarget). Zbytek přehrávače o rozdílu nic neví.
+        private IAudioRoute? _route;
+        private bool _routeIsNetwork;
+
         private AudioFileReader? _audioFile;
         private MeteringSampleProvider? _meteringProvider;
 
@@ -14,6 +23,13 @@ namespace PS150.UI.Windows
         // Hodnota se pamatuje i mezi soubory - nastaví se jednou (SetSpeedFactor)
         // a platí pro každý další Load(), dokud ji někdo nezmění.
         private double _speedFactor = 1.0;
+
+        // NOVÉ: síťový výstup. Cíl se nastavuje zvenčí (SetNetworkTarget);
+        // _networkOutput je jeden proud pro všechny skladby po sobě, dokud je
+        // příjemce dostupný (příjemce tak mezi skladbami nic nerestartuje).
+        private IPEndPoint? _networkEndpoint;
+        private ReceiverInfo? _networkInfo;
+        private NetworkAudioOutput? _networkOutput;
 
         public event Action? PlaybackEnded;
 
@@ -23,7 +39,16 @@ namespace PS150.UI.Windows
         /// <summary>Aktuální poměr rychlosti přehrávání (1.0 = původní).</summary>
         public double SpeedFactor => _speedFactor;
 
-        public bool IsPlaying => _wasapiOut?.PlaybackState == PlaybackState.Playing;
+        public bool IsPlaying => _route?.State == PlaybackState.Playing;
+
+        /// <summary>True, pokud zvuk právě jde po síti do externí zvukovky (ne do zvukovky počítače).</summary>
+        public bool UsesNetwork => _routeIsNetwork;
+
+        /// <summary>
+        /// Zpoždění zvuku na straně externí zvukovky v ms (0, když se hraje lokálně).
+        /// Slouží k synchronizaci obrazu u filmů.
+        /// </summary>
+        public int NetworkLatencyMs => _routeIsNetwork && _networkInfo != null ? _networkInfo.LatencyMs : 0;
 
         // ZMĚNA: časy se přepočítávají na SKUTEČNÝ čas přehrávání. Soubor
         // o délce 3:00 hraný 3 % rychleji trvá 2:55 - přesně to chceme na
@@ -48,17 +73,19 @@ namespace PS150.UI.Windows
 
             _audioFile = new AudioFileReader(filePath);
 
-            // Sestaví řetězec zpracování a WASAPI výstup (viz BuildOutput níž).
+            // Sestaví řetězec zpracování a výstup (viz BuildOutput níž).
             BuildOutput();
         }
 
         /// <summary>
-        /// NOVÉ: Sestaví (nebo znovu sestaví) výstupní řetězec pro právě
-        /// načtený soubor:
+        /// Sestaví (nebo znovu sestaví) výstupní řetězec pro právě načtený soubor:
         ///
-        ///   soubor -> [varispeed -> převzorkování zpět] -> měření úrovně -> WASAPI
+        ///   soubor -> [varispeed -> převzorkování zpět] -> měření úrovně -> výstup
         ///
-        /// Prostřední část se do řetězce vkládá JEN když je ladění zapnuté
+        /// kde výstup je buď WASAPI (zvukovka počítače), nebo síť (stereo,
+        /// kmitočet podle příjemce).
+        ///
+        /// Varispeed se do řetězce vkládá JEN když je ladění zapnuté
         /// (_speedFactor se liší od 1). Bez ladění jde signál ze souboru
         /// beze změny přímo do měření a výstupu, přesně jako dřív.
         ///
@@ -74,16 +101,10 @@ namespace PS150.UI.Windows
         {
             if (_audioFile == null) return;
 
-            // Starý výstup (je-li) zrušíme, ale SOUBOR ponecháme, aby se
-            // nezměnila pozice v něm. PlaybackStopped odpojíme dřív než
+            // Starou trasu (je-li) zrušíme, ale SOUBOR ponecháme, aby se
+            // nezměnila pozice v něm. Událost o ukončení se odpojí dřív než
             // Stop(), jinak by zrušení vyvolalo falešné "doehráno".
-            if (_wasapiOut != null)
-            {
-                _wasapiOut.PlaybackStopped -= OnPlaybackStopped;
-                _wasapiOut.Stop();
-                _wasapiOut.Dispose();
-                _wasapiOut = null;
-            }
+            DisposeRoute();
 
             ISampleProvider chain = _audioFile;
 
@@ -100,10 +121,106 @@ namespace PS150.UI.Windows
             _meteringProvider = new MeteringSampleProvider(chain);
             _meteringProvider.StreamVolume += OnStreamVolume;
 
-            // 2. Initialize WASAPI with the sample provider
-            _wasapiOut = new WasapiOut(NAudio.CoreAudioApi.AudioClientShareMode.Shared, 100);
-            _wasapiOut.Init(_meteringProvider);
-            _wasapiOut.PlaybackStopped += OnPlaybackStopped; // <-- Add this!
+            // 2. Výstup: síť, je-li externí zvukovka k dispozici; jinak (nebo při
+            //    jakékoliv chybě) zvukovka počítače.
+            bool network = false;
+
+            if (_networkEndpoint != null && _networkInfo != null)
+            {
+                try
+                {
+                    _route = CreateNetworkRoute(_meteringProvider);
+                    network = true;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[AudioPlayer] Síťový výstup se nepodařilo vytvořit: {ex.Message}");
+                    DisposeNetworkOutput();
+                    _route = null;
+                }
+            }
+
+            _route ??= new WasapiRoute(_meteringProvider);
+            _routeIsNetwork = network;
+            _route.Ended += OnRouteEnded;
+        }
+
+        private IAudioRoute CreateNetworkRoute(ISampleProvider source)
+        {
+            ReceiverInfo info = _networkInfo!;
+            IPEndPoint endpoint = _networkEndpoint!;
+
+            ISampleProvider net = source;
+
+            // Na síť jde vždy stereo v kmitočtu, který příjemce očekává.
+            if (net.WaveFormat.Channels == 1)
+            {
+                net = new MonoToStereoSampleProvider(net);
+            }
+            else if (net.WaveFormat.Channels > 2)
+            {
+                var mux = new MultiplexingSampleProvider(new[] { net }, 2);
+                mux.ConnectInputToOutput(0, 0);
+                mux.ConnectInputToOutput(1, 1);
+                net = mux;
+            }
+
+            if (net.WaveFormat.SampleRate != info.SampleRate)
+            {
+                net = new WdlResamplingSampleProvider(net, info.SampleRate);
+            }
+
+            if (_networkOutput != null && _networkOutput.SampleRate != info.SampleRate)
+            {
+                DisposeNetworkOutput();
+            }
+
+            _networkOutput ??= new NetworkAudioOutput(endpoint.Address.ToString(), endpoint.Port, info.SampleRate, 2);
+
+            return new NetworkRoute(net, _networkOutput, SynchronizationContext.Current);
+        }
+
+        private void DisposeRoute()
+        {
+            if (_route == null) return;
+
+            _route.Ended -= OnRouteEnded;
+            _route.Stop();
+            _route.Dispose();
+            _route = null;
+            _routeIsNetwork = false;
+        }
+
+        private void DisposeNetworkOutput()
+        {
+            _networkOutput?.Dispose();
+            _networkOutput = null;
+        }
+
+        /// <summary>
+        /// NOVÉ: Nastaví (nebo zruší) cíl pro přehrávání po síti. Volá se, když
+        /// se na síti objeví nebo zmizí externí zvukovka (viz AudioReceiverWatcher).
+        /// Funguje i za chodu: výstup se přepne a přehrávání pokračuje na
+        /// stejném místě souboru a ve stejném stavu (hraje / pauza).
+        /// </summary>
+        public void SetNetworkTarget(IPEndPoint? endpoint, ReceiverInfo? info)
+        {
+            bool wasNetwork = _networkEndpoint != null && _networkInfo != null;
+
+            _networkEndpoint = endpoint;
+            _networkInfo = info;
+
+            bool wantNetwork = endpoint != null && info != null;
+
+            if (!wantNetwork) DisposeNetworkOutput();
+
+            // Nic není načtené -> hodnota se použije při příštím Load().
+            if (_audioFile == null || _route == null) return;
+
+            // Jen se obnovily parametry příjemce a trasa už je ta správná.
+            if (wasNetwork == wantNetwork && _routeIsNetwork == wantNetwork) return;
+
+            RebuildKeepingState();
         }
 
         /// <summary>
@@ -124,20 +241,26 @@ namespace PS150.UI.Windows
 
             // Nic nehraje a nic není načtené -> jen si hodnotu zapamatujeme
             // pro příští Load().
-            if (_audioFile == null || _wasapiOut == null) return;
+            if (_audioFile == null || _route == null) return;
 
-            PlaybackState stateBefore = _wasapiOut.PlaybackState;
+            RebuildKeepingState();
+        }
+
+        /// <summary>Znovu sestaví výstup a vrátí ho do stavu, v jakém byl (hraje / pauza).</summary>
+        private void RebuildKeepingState()
+        {
+            PlaybackState stateBefore = _route?.State ?? PlaybackState.Stopped;
 
             BuildOutput();
 
             if (stateBefore == PlaybackState.Playing)
             {
-                _wasapiOut?.Play();
+                _route?.Play();
             }
             else if (stateBefore == PlaybackState.Paused)
             {
-                _wasapiOut?.Play();
-                _wasapiOut?.Pause();
+                _route?.Play();
+                _route?.Pause();
             }
         }
 
@@ -149,8 +272,7 @@ namespace PS150.UI.Windows
             else MaxRightPeak = MaxLeftPeak;
         }
 
-
-        private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
+        private void OnRouteEnded()
         {
             // Check if we reached the end of the file naturally
             if (_audioFile != null && _audioFile.CurrentTime >= _audioFile.TotalTime - TimeSpan.FromMilliseconds(500))
@@ -159,15 +281,12 @@ namespace PS150.UI.Windows
             }
         }
 
-
-        public void Play() => _wasapiOut?.Play();
-        public void Pause() => _wasapiOut?.Pause();
+        public void Play() => _route?.Play();
+        public void Pause() => _route?.Pause();
 
         public void Stop()
         {
-            _wasapiOut?.Stop();
-            _wasapiOut?.Dispose();
-            _wasapiOut = null;
+            DisposeRoute();
 
             _audioFile?.Dispose();
             _audioFile = null;
@@ -208,7 +327,161 @@ namespace PS150.UI.Windows
             return (MaxLeftPeak, MaxRightPeak);
         }
 
-        public void Dispose() => Stop();
+        public void Dispose()
+        {
+            Stop();
+            DisposeNetworkOutput();
+        }
+
+        // ==================================================================
+        // Trasy výstupu
+        // ==================================================================
+
+        private interface IAudioRoute : IDisposable
+        {
+            PlaybackState State { get; }
+            void Play();
+            void Pause();
+            void Stop();
+
+            /// <summary>Přehrávání skončilo (soubor došel, nebo ho zastavilo zařízení).</summary>
+            event Action? Ended;
+        }
+
+        /// <summary>Zvuková karta počítače přes WASAPI (stejně jako dřív).</summary>
+        private sealed class WasapiRoute : IAudioRoute
+        {
+            private readonly WasapiOut _out;
+
+            public event Action? Ended;
+
+            public WasapiRoute(ISampleProvider source)
+            {
+                _out = new WasapiOut(NAudio.CoreAudioApi.AudioClientShareMode.Shared, 100);
+                _out.Init(source);
+                _out.PlaybackStopped += OnStopped;
+            }
+
+            private void OnStopped(object? sender, StoppedEventArgs e) => Ended?.Invoke();
+
+            public PlaybackState State => _out.PlaybackState;
+            public void Play() => _out.Play();
+            public void Pause() => _out.Pause();
+
+            public void Stop() => _out.Stop();
+
+            public void Dispose()
+            {
+                _out.PlaybackStopped -= OnStopped;
+                _out.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Síť: vlastní vlákno čte hotové vzorky z řetězce po paketech a posílá
+        /// je přes NetworkAudioOutput, který sám hlídá tempo (reálný čas).
+        /// Pauza vlákno jen uspí - pakety se přestanou posílat a příjemce
+        /// po vyprázdnění bufferu ztichne.
+        /// </summary>
+        private sealed class NetworkRoute : IAudioRoute
+        {
+            private readonly ISampleProvider _source;
+            private readonly NetworkAudioOutput _output;
+            private readonly SynchronizationContext? _context;
+
+            private Thread? _thread;
+            private volatile PlaybackState _state = PlaybackState.Stopped;
+            private volatile bool _quit;
+
+            public event Action? Ended;
+
+            public NetworkRoute(ISampleProvider source, NetworkAudioOutput output, SynchronizationContext? context)
+            {
+                _source = source;
+                _output = output;
+                _context = context;
+            }
+
+            public PlaybackState State => _state;
+
+            public void Play()
+            {
+                if (_thread == null)
+                {
+                    _quit = false;
+                    _state = PlaybackState.Playing;
+                    _thread = new Thread(Pump)
+                    {
+                        IsBackground = true,
+                        Name = "AudioPlayer-Network",
+                        Priority = ThreadPriority.AboveNormal
+                    };
+                    _thread.Start();
+                }
+                else
+                {
+                    _state = PlaybackState.Playing;
+                }
+            }
+
+            public void Pause()
+            {
+                if (_state == PlaybackState.Playing) _state = PlaybackState.Paused;
+            }
+
+            public void Stop()
+            {
+                _quit = true;
+                _state = PlaybackState.Stopped;
+
+                Thread? thread = _thread;
+                _thread = null;
+
+                if (thread != null && thread != Thread.CurrentThread) thread.Join(1000);
+            }
+
+            public void Dispose() => Stop();
+
+            private void Pump()
+            {
+                var buffer = new float[NetworkDefaults.PacketFrames * 2];
+                bool endOfFile = false;
+
+                try
+                {
+                    while (!_quit)
+                    {
+                        if (_state != PlaybackState.Playing)
+                        {
+                            Thread.Sleep(5);
+                            continue;
+                        }
+
+                        int read = _source.Read(buffer, 0, buffer.Length);
+                        if (read <= 0)
+                        {
+                            endOfFile = true;
+                            break;
+                        }
+
+                        _output.Write(buffer.AsSpan(0, read - read % 2));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[AudioPlayer] Chyba síťového výstupu: {ex.Message}");
+                    endOfFile = true;
+                }
+
+                if (endOfFile && !_quit)
+                {
+                    _state = PlaybackState.Stopped;
+
+                    if (_context != null) _context.Post(_ => Ended?.Invoke(), null);
+                    else Ended?.Invoke();
+                }
+            }
+        }
 
         /// <summary>
         /// Pomocník pro varispeed: předává vzorky beze změny, jen mění
