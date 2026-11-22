@@ -72,6 +72,9 @@ namespace PS150.UI.Windows
         // NOVÉ: ladění / transpozice (klávesa t, zadávání hodnot klávesou INSERT).
         // _tuning je neměnný objekt (viz PlayerTuning) - při změně se celý vymění.
         private PlayerTuning _tuning = PlayerTuning.Off;
+        // Ladění, které platilo těsně před INSERT - Esc se k němu vrátí
+        // (šipky totiž mění ladění průběžně, ještě před potvrzením Enterem).
+        private PlayerTuning _tuningBeforeInput = PlayerTuning.Off;
         private bool _tuningInputActive = false;
         private readonly StringBuilder _tuningInputBuffer = new StringBuilder();
         private string? _tuningInputError = null;
@@ -287,6 +290,16 @@ namespace PS150.UI.Windows
                     case Key.Back:
                         if (_tuningInputBuffer.Length > 0) _tuningInputBuffer.Length--;
                         _tuningInputError = null;
+                        e.Handled = true;
+                        return;
+
+                    case Key.Up:
+                        NudgeTransposition(+1.0);
+                        e.Handled = true;
+                        return;
+
+                    case Key.Down:
+                        NudgeTransposition(-1.0);
                         e.Handled = true;
                         return;
 
@@ -588,23 +601,64 @@ namespace PS150.UI.Windows
 
         private void BeginTuningInput()
         {
+            _tuningBeforeInput = _tuning;   // pro Esc (vrácení původního ladění)
             _tuningInputBuffer.Clear();
             _tuningInputError = null;
             _tuningInputActive = true;
             _grid.Clear();
         }
 
+        /// <summary>Esc při zadávání: zruší zadávání a vrátí ladění, které platilo před INSERT (i když se mezitím měnilo šipkami).</summary>
         private void CancelTuningInput()
         {
             _tuningInputBuffer.Clear();
             _tuningInputError = null;
             _tuningInputActive = false;
-            _grid.Clear();
+
+            bool changedMeanwhile =
+                _tuning.Active != _tuningBeforeInput.Active ||
+                _tuning.TransposeSemitones != _tuningBeforeInput.TransposeSemitones ||
+                _tuning.ReferenceA4Hz != _tuningBeforeInput.ReferenceA4Hz;
+
+            if (changedMeanwhile)
+            {
+                ApplyTuning(_tuningBeforeInput);   // uvnitř se mřížka vymaže
+            }
+            else
+            {
+                _grid.Clear();
+            }
         }
 
-        /// <summary>ENTER při zadávání: přečte text, a když je v pořádku, použije ho. Při chybě zůstane zadávání otevřené a ukáže se důvod.</summary>
+        /// <summary>
+        /// Šipka nahoru/dolů při zadávání: posune transpozici o celé
+        /// půltóny (zlomek se zachová: z +0.5 jde šipkou nahoru na +1.5)
+        /// a ladění tím zároveň zapne. Změna se projeví hned, za chodu.
+        /// Rozsah ±12 půltónů hlídá PlayerTuning. Referenční A4 se šipkami
+        /// nemění.
+        /// </summary>
+        private void NudgeTransposition(double deltaSemitones)
+        {
+            _tuningInputBuffer.Clear();
+            _tuningInputError = null;
+
+            ApplyTuning(new PlayerTuning(
+                true,
+                _tuning.TransposeSemitones + deltaSemitones,
+                _tuning.ReferenceA4Hz));
+        }
+
+        /// <summary>ENTER při zadávání: přečte text, a když je v pořádku, použije ho. Prázdné pole = nechat to, co nastavily šipky. Při chybě zůstane zadávání otevřené a ukáže se důvod.</summary>
         private void CommitTuningInput()
         {
+            if (_tuningInputBuffer.Length == 0)
+            {
+                _tuningInputError = null;
+                _tuningInputActive = false;
+                _grid.Clear();
+                return;
+            }
+
             if (PlayerTuning.TryParseInput(_tuningInputBuffer.ToString(), _tuning, out PlayerTuning parsed, out string error))
             {
                 _tuningInputBuffer.Clear();
@@ -841,7 +895,7 @@ namespace PS150.UI.Windows
                 else
                 {
                     _grid.ForegroundColor = ConsoleColor.DarkGray;
-                    _grid.WriteLine(TextLayout.FitWidth(" +0.5 = pt   A442 = Hz", Cols));
+                    _grid.WriteLine(TextLayout.FitWidth(" Up/Dn=+-1pt +0.5 A442", Cols));
                 }
                 _grid.ResetColor();
             }
