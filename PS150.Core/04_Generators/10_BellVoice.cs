@@ -152,7 +152,7 @@ namespace PS150.Core.Generators
         public override bool IsFinished =>
             base.IsFinished || (HasStarted && _lastPeakPartialLevel < SilenceThresholdLinear);
 
-        protected override BandSample CalculateWaveform(double frequency)
+        protected override double CalculateWaveform(double frequency)
         {
             double effectiveFrequency = frequency;
 
@@ -163,7 +163,7 @@ namespace PS150.Core.Generators
                 effectiveFrequency = frequency * (1.0 + modulator * _modDepth);
             }
 
-            BandSample bands = default;
+            double sum = 0.0;   // ZMĚNA: mono
             double peakLevel = 0.0;
 
             for (int i = 0; i < _partialRatios.Length; i++)
@@ -174,7 +174,7 @@ namespace PS150.Core.Generators
 
                 double value = Math.Sin(phase * 2.0 * Math.PI) * level;
                 double partialFreq = effectiveFrequency * _partialRatios[i];
-                AddToBand(ref bands, partialFreq, value);
+                sum += value;
 
                 if (level > peakLevel) peakLevel = level;
             }
@@ -187,7 +187,7 @@ namespace PS150.Core.Generators
 
                 double detunedValue = Math.Sin(detunedPhase * 2.0 * Math.PI) * detunedLevel;
                 double detunedFreq = effectiveFrequency * DetunedNominalRatio;
-                AddToBand(ref bands, detunedFreq, detunedValue);
+                sum += detunedValue;
 
                 if (detunedLevel > peakLevel) peakLevel = detunedLevel;
             }
@@ -196,7 +196,7 @@ namespace PS150.Core.Generators
             _elapsedSeconds += 1.0 / SampleRate;
 
             // Normalizace - partiálů je dohromady 8, ať zvon nepřebuzuje výstup
-            return bands * 0.3;
+            return sum * 0.3;
         }
     }
 }

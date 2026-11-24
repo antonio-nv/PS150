@@ -548,7 +548,15 @@ namespace PS150.UI.Windows
                         $"Výstupní zařízení '{DeviceName}' nebylo na tomto PC nalezeno.");
                 }
 
-                midiFile = MidiFile.Read(filePath);
+                // NOVÉ: tolerantní čtení - některé (hlavně herní) .mid soubory mají
+                // v řídicí události hodnotu mimo rozsah 0-127 (např. 128). DryWetMidi
+                // by jinak celý soubor odmítl s chybou "128 is invalid value ...";
+                // SnapToLimits hodnotu oseká na nejbližší platnou (127), jak to dělají
+                // jiné přehrávače.
+                midiFile = MidiFile.Read(filePath, new ReadingSettings
+                {
+                    InvalidChannelEventParameterValuePolicy = InvalidChannelEventParameterValuePolicy.SnapToLimits
+                });
 
                 // Celková délka - spočítaná přesně z dat souboru (viz komentář
                 // u TotalTime výše), jednou hned po načtení.

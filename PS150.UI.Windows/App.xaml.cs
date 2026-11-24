@@ -103,19 +103,28 @@ namespace PS150.UI.Windows
 
             _inputManager.OnInputEvent += evt =>
             {
+                // ZMĚNA: kanál a dynamika jdou do syntezátoru (bicí na kanálu 10, velocity),
+                // pedál sustain (CC64) platí pro klavírní rejstříky.
+                if (evt.Type == InputEventType.ControlChange)
+                {
+                    if (evt.Controller == 64) _toneEngine?.SetSustain(evt.ControllerValue >= 64);
+                    return;
+                }
+
                 if (evt.Type == InputEventType.NoteOn && evt.Velocity > 0)
                 {
-                    _toneEngine?.NoteOn(evt.Note.Number);
+                    _toneEngine?.NoteOn(evt.Note.Number, evt.Channel, evt.Velocity);
                 }
                 else
                 {
-                    _toneEngine?.NoteOff(evt.Note.Number);
+                    _toneEngine?.NoteOff(evt.Note.Number, evt.Channel);
                 }
 
                 Debug.WriteLine($"[{evt.Source}] {evt.Type} | Nota: {evt.Note.Number} ({evt.Note.FrequencyHz:F1} Hz)");
             };
 
-            _inputManager.StartLiveDevice("USB MIDI");
+            // ZMĚNA: otevírají se všechna MIDI-IN rozhraní, s hot-plugem (připojení/odpojení za běhu).
+            _inputManager.StartMidiInputs();
 
             // 3. NAČTENÍ NASTAVENÍ A KONTROLA ARGUMENTŮ
             AppSettings settings = AppSettings.Load();

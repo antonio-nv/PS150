@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -10,6 +10,8 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using PS150.Core;
+using PS150.Core.Parameters;   // NOVÉ: Parameter, FieldForm
+using PS150.Core.Input;
 using PS150.Core.Network;
 using PS150.Core.Tones;
 
@@ -49,6 +51,23 @@ namespace PS150.UI.Windows
 
         // NOVÉ: je okno aktivní? (řídí barvu titulku, viz Activated/Deactivated)
         private bool _windowActive = true;
+        private DispatcherTimer _positionSaveTimer = null!;   // NOVÉ: odložené ukládání polohy okna
+        // NOVÉ: ukládání polohy se zapne až po prvním vykreslení okna - ať se
+        // neuloží nějaká přechodná poloha z doby, kdy se okno teprve zobrazuje.
+        private bool _positionTracking = false;
+
+        // NOVÉ: diagnostický zápis polohy okna do souboru poloha.log vedle exe
+        // (pro hledání chyby; po ověření půjde smazat).
+        private static void PosLog(string text)
+        {
+            try
+            {
+                File.AppendAllText(
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "poloha.log"),
+                    $"{DateTime.Now:HH:mm:ss.fff} [{Environment.ProcessId}] {text}{Environment.NewLine}");
+            }
+            catch { /* log nesmí shodit program */ }
+        }
         private const int StaffColumns = 4;   // NOVÉ: kanálů MIDI osnov vedle sebe v jednom řádku
 
         private readonly TextGridControl _grid;
@@ -76,22 +95,28 @@ namespace PS150.UI.Windows
 
         private double _leftDb = -120.0;
         private double _rightDb = -120.0;
-        private double _bassDb = -120.0;
-        private double _midDb = -120.0;
-        private double _trebleDb = -120.0;
         private int _volume = 80;
         private bool _isPaused = false;
         private bool _isMidiMode = false;
 
-        // NOVÉ: ladění / transpozice (klávesa t, zadávání hodnot klávesou INSERT).
+        // NOVÉ: ladění / transpozice (klávesa t nebo pole v řádku 3).
         // _tuning je neměnný objekt (viz PlayerTuning) - při změně se celý vymění.
         private PlayerTuning _tuning = PlayerTuning.Off;
-        // Ladění, které platilo těsně před INSERT - Esc se k němu vrátí
-        // (šipky totiž mění ladění průběžně, ještě před potvrzením Enterem).
-        private PlayerTuning _tuningBeforeInput = PlayerTuning.Off;
-        private bool _tuningInputActive = false;
-        private readonly StringBuilder _tuningInputBuffer = new StringBuilder();
-        private string? _tuningInputError = null;
+
+        // NOVÉ: formulář s textovými poli (hlasitost, ladění, AJI...) - ovládání
+        // myší (klik, kolečko), Tab, +/- a zadáním čísla. Logika je v Core
+        // (PS150.Core.Parameters), tady se jen kreslí a předává vstup. INSERT se zrušil.
+        private readonly FieldForm _form = new FieldForm();
+        private FormField _fVolume = null!;
+        private FormField _fDrums = null!;
+        private FormField _fTuneOn = null!;
+        private FormField _fTranspose = null!;
+        private FormField _fA4 = null!;
+        private FormField _fAji = null!;
+
+        // Odložené ukládání nastavení: kolečko dělá desítky změn za sekundu,
+        // settings.json se zapíše až po chvíli klidu (a při zavření okna).
+        private DispatcherTimer _settingsSaveTimer = null!;
 
         private readonly StringBuilder _registerInputBuffer = new StringBuilder();
 
@@ -116,6 +141,34 @@ namespace PS150.UI.Windows
             // NOVÉ: změna barvy titulku podle aktivity okna
             Activated += (s, e) => { _windowActive = true; RenderDashboard(); _grid.Redraw(); };
             Deactivated += (s, e) => { _windowActive = false; RenderDashboard(); _grid.Redraw(); };
+
+            // NOVÉ: polohu okna (zvlášť pro vodorovný / svislý režim) obnovujeme už
+            // tady, PŘED zobrazením okna - dřív se okno ukázalo na výchozím místě
+            // a teprve v Loaded se přesunulo. Ukládá se průběžně (LocationChanged,
+            // s odkladem), ne jen při zavření: když se otevře další soubor a
+            // předchozí instance PS150 se násilně ukončí (KillPreviousInstances),
+            // Window_Closing se vůbec nezavolá a poloha by se ztratila.
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            RestoreWindowPosition();
+
+            _positionSaveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+            _positionSaveTimer.Tick += (s, e) =>
+            {
+                _positionSaveTimer.Stop();
+                StoreWindowPosition();
+                _settings.Save();
+            };
+            LocationChanged += (s, e) =>
+            {
+                if (!_positionTracking) return;
+                _positionSaveTimer.Stop();
+                _positionSaveTimer.Start();
+            };
+            ContentRendered += (s, e) =>
+            {
+                PosLog($"ContentRendered: Left={Left} Top={Top} W={ActualWidth} H={ActualHeight} rotated={_settings.Rotated90}");
+                _positionTracking = true;
+            };
 
             // NOVÉ: ladění uložené z minula (settings.json) se hned použije,
             // než se načte první soubor.
@@ -153,11 +206,20 @@ namespace PS150.UI.Windows
             AddTransportButtons();
             WireMidiPlayerEvents();
 
-            // NOVÉ: znaky zadávané při psaní ladění (INSERT) se berou z události
+            // NOVÉ: znaky zadávané do textových polí se berou z události
             // TextInput, ne z KeyDown - TextInput dostane skutečný znak podle
             // rozložení klávesnice (na české klávesnici třeba "+" nebo číslice
             // přes Shift), kdežto KeyDown zná jen fyzickou klávesu.
             TextInput += Window_TextInput;
+
+            _settingsSaveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _settingsSaveTimer.Tick += (s, e) =>
+            {
+                _settingsSaveTimer.Stop();
+                _settings.Save();
+            };
+
+            CreateFormFields();
 
             _tickTimer.Tick += (s, e) => Tick();
         }
@@ -241,11 +303,14 @@ namespace PS150.UI.Windows
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
-            RestoreWindowPosition();
-            StartWithPendingFile();
+            PosLog($"Loaded: Left={Left} Top={Top} W={ActualWidth} H={ActualHeight}");
+            StartWithPendingFile();   // poloha okna je už obnovená v konstruktoru
 
-            // Otočené okno je vysoké - ať nevyčnívá dolů z obrazovky.
-            Dispatcher.BeginInvoke(new Action(KeepOnScreen), DispatcherPriority.Loaded);
+            // OPRAVA: tady se dřív volalo KeepOnScreen(). Okno ale při startu
+            // bývá chvíli vyšší (výchozí počet řádků mřížky, po načtení souboru
+            // se zmenší), takže ho to posunulo nahoru od spodního okraje a
+            // posunutá poloha se pak uložila. Poloha z minula se proto už
+            // nijak "nesráží" - kontrolu monitorů dělá RestoreWindowPosition.
         }
 
         // ------------------------------------------------------------------
@@ -265,7 +330,17 @@ namespace PS150.UI.Windows
 
             int col = (int)(p.X / _grid.CellWidth);
             int row = (int)(p.Y / _grid.CellHeight);
-            if (row != 0) return;
+
+            if (row != 0)
+            {
+                // NOVÉ: klik na textové pole formuláře (mimo pole se zaostření zruší)
+                if (_form.Click(row, col))
+                {
+                    RenderDashboard();
+                    e.Handled = true;
+                }
+                return;
+            }
 
             if (col >= Cols - 8 && col <= Cols - 6)
             {
@@ -301,10 +376,7 @@ namespace PS150.UI.Windows
             SizeToContent = SizeToContent.Manual;
             SizeToContent = SizeToContent.WidthAndHeight;
 
-            if (IsLoaded)
-            {
-                Dispatcher.BeginInvoke(new Action(KeepOnScreen), DispatcherPriority.Loaded);
-            }
+            // KeepOnScreen se volá jen při ručním přepnutí klávesou r (viz HandleInput)
         }
 
         /// <summary>Po změně tvaru okna ho posune tak, aby celé zůstalo na obrazovce.</summary>
@@ -317,6 +389,7 @@ namespace PS150.UI.Windows
             double right = left + SystemParameters.VirtualScreenWidth;
             double bottom = top + SystemParameters.VirtualScreenHeight;
 
+            PosLog($"KeepOnScreen: Left={Left} Top={Top} W={ActualWidth} H={ActualHeight} limit={right}x{bottom}");
             if (Left + ActualWidth > right) Left = Math.Max(left, right - ActualWidth);
             if (Top + ActualHeight > bottom) Top = Math.Max(top, bottom - ActualHeight);
         }
@@ -324,6 +397,10 @@ namespace PS150.UI.Windows
         /// <summary>Uloží polohu okna do položky pro aktuální (vodorovný / svislý) režim.</summary>
         private void StoreWindowPosition()
         {
+            // Minimalizované okno má souřadnice kolem -32000 - takové neukládáme.
+            if (WindowState != WindowState.Normal || Left < -10000 || Top < -10000) return;
+            PosLog($"Store: rotated={_settings.Rotated90} Left={Left} Top={Top}");
+
             if (_settings.Rotated90)
             {
                 _settings.RotatedWindowX = (int)Left;
@@ -336,12 +413,14 @@ namespace PS150.UI.Windows
             }
         }
 
-        private void RestoreWindowPosition()
+        /// <summary>Vrací true, když se uložená poloha použila.</summary>
+        private bool RestoreWindowPosition()
         {
             // NOVÉ: poloha se pamatuje zvlášť pro vodorovný a svislý režim.
             int? posX = _settings.Rotated90 ? _settings.RotatedWindowX : _settings.WindowX;
             int? posY = _settings.Rotated90 ? _settings.RotatedWindowY : _settings.WindowY;
-            if (!posX.HasValue || !posY.HasValue) return;
+            PosLog($"Restore: rotated={_settings.Rotated90} ulozeno={posX},{posY} (W={_settings.WindowX},{_settings.WindowY} R={_settings.RotatedWindowX},{_settings.RotatedWindowY}) obrazovka={SystemParameters.VirtualScreenLeft},{SystemParameters.VirtualScreenTop} {SystemParameters.VirtualScreenWidth}x{SystemParameters.VirtualScreenHeight}");
+            if (!posX.HasValue || !posY.HasValue) return false;
 
             double vLeft = SystemParameters.VirtualScreenLeft;
             double vTop = SystemParameters.VirtualScreenTop;
@@ -357,16 +436,21 @@ namespace PS150.UI.Windows
                 posY.Value >= vTop &&
                 posY.Value <= vTop + vHeight - minVisible;
 
+            PosLog($"Restore: withinBounds={withinBounds}");
             if (withinBounds)
             {
                 Left = posX.Value;
                 Top = posY.Value;
             }
+
+            return withinBounds;
         }
 
         private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
             _tickTimer.Stop();
+            _positionSaveTimer.Stop();
+            _settingsSaveTimer.Stop();   // nastavení se uloží níž tak jako tak
 
             StoreWindowPosition();
 
@@ -403,6 +487,24 @@ namespace PS150.UI.Windows
 
         private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
         {
+            // NOVÉ: kolečko nad textovým polem mění jeho hodnotu, jinde hlasitost jako dřív.
+            Point p = e.GetPosition(RootCanvas);
+            if (p.X >= 0 && p.Y >= 0)
+            {
+                int col = (int)(p.X / _grid.CellWidth);
+                int row = (int)(p.Y / _grid.CellHeight);
+
+                int notches = e.Delta / 120;
+                if (notches == 0) notches = Math.Sign(e.Delta);
+
+                if (_form.Wheel(row, col, notches, CurrentStepSize()))
+                {
+                    RenderDashboard();
+                    e.Handled = true;
+                    return;
+                }
+            }
+
             ChangeVolume(e.Delta > 0 ? 5 : -5);
             RenderDashboard();
         }
@@ -419,42 +521,53 @@ namespace PS150.UI.Windows
                 return;
             }
 
-            // NOVÉ: když se právě zadává ladění (INSERT), řídicí klávesy
-            // obslouží tady, a ZNAKOVÉ klávesy se záměrně NEoznačí jako
-            // vyřízené (e.Handled zůstane false) - jedině tak WPF vyvolá
-            // událost TextInput, která znak doručí do Window_TextInput níž.
-            if (_tuningInputActive)
+            // NOVÉ: textová pole formuláře. Řídicí klávesy (Tab, Enter, Esc, Backspace,
+            // Ctrl+PgUp/PgDn) vyřídí formulář. ZNAKOVÉ klávesy se u zaostřeného pole
+            // záměrně NEoznačí jako vyřízené (e.Handled zůstane false) - jedině tak
+            // WPF vyvolá událost TextInput, která znak doručí do Window_TextInput níž.
+            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+
+            // ZMĚNA: velikost kroku podle Shift (hrubý) / Ctrl (jemný). Ctrl + numerické +/-
+            // nebo Ctrl + minus = jemný krok (znak z nich TextInput nedoručí, proto tady).
+            bool fineKey = ctrl && _form.HasFocus && !_form.Editing
+                && (e.Key == Key.Add || e.Key == Key.Subtract || e.Key == Key.OemPlus || e.Key == Key.OemMinus);
+            if (fineKey)
             {
-                switch (e.Key)
+                bool up = e.Key == Key.Add || e.Key == Key.OemPlus;
+                _form.HandleKey(up ? FormKey.NudgeUp : FormKey.NudgeDown, StepSize.Fine);
+                e.Handled = true;
+                RenderDashboard();
+                return;
+            }
+
+            bool handledByForm = e.Key switch
+            {
+                Key.Tab => _form.HandleKey(shift ? FormKey.ShiftTab : FormKey.Tab),
+                Key.Enter => _form.HandleKey(FormKey.Enter),
+                Key.Escape => _form.HandleKey(FormKey.Escape),
+                Key.Back => _form.HandleKey(FormKey.Backspace),
+                Key.PageUp when ctrl => _form.HandleKey(FormKey.NudgeUp, shift ? StepSize.Coarse : StepSize.Normal),
+                Key.PageDown when ctrl => _form.HandleKey(FormKey.NudgeDown, shift ? StepSize.Coarse : StepSize.Normal),
+                Key.Delete => _form.HandleKey(FormKey.Reset),
+                _ => false
+            };
+
+            if (handledByForm)
+            {
+                e.Handled = true;
+                RenderDashboard();
+                return;
+            }
+
+            if (_form.HasFocus)
+            {
+                if (IsFieldCharKey(e.Key)) return;   // znak doručí TextInput
+
+                if (_form.Editing)
                 {
-                    case Key.Enter:
-                        CommitTuningInput();
-                        e.Handled = true;
-                        return;
-
-                    case Key.Escape:
-                        CancelTuningInput();
-                        e.Handled = true;
-                        return;
-
-                    case Key.Back:
-                        if (_tuningInputBuffer.Length > 0) _tuningInputBuffer.Length--;
-                        _tuningInputError = null;
-                        e.Handled = true;
-                        return;
-
-                    case Key.Up:
-                        NudgeTransposition(+1.0);
-                        e.Handled = true;
-                        return;
-
-                    case Key.Down:
-                        NudgeTransposition(-1.0);
-                        e.Handled = true;
-                        return;
-
-                    default:
-                        return;
+                    e.Handled = true;                // při zadávání čísla nic jiného nefunguje
+                    return;
                 }
             }
 
@@ -503,26 +616,6 @@ namespace PS150.UI.Windows
                 _rightDb = AudioMeter.LinearToDecibels(Math.Max(peakR, organPeakForLR));
             }
 
-            // H/S/V + Reg:/Akt: (varhanní engine) nezávisle na tom, co se
-            // zrovna prohlíží/přehrává (mp3/wav/flac/mid/prázdná konzole) -
-            // jen podle toho, jestli je fyzicky připojené MIDI-IN (klaviatura
-            // může hrát kdykoliv, bez ohledu na to, co je na obrazovce).
-            if (App.Input?.IsLiveDeviceConnected ?? false)
-            {
-                float bassPeak = 0f, midPeak = 0f, treblePeak = 0f;
-                if (App.OrganEngine != null)
-                {
-                    var bandPeaks = App.OrganEngine.ReadBandPeaks();
-                    bassPeak = bandPeaks.Bass;
-                    midPeak = bandPeaks.Mid;
-                    treblePeak = bandPeaks.Treble;
-                }
-
-                _bassDb = AudioMeter.LinearToDecibels(bassPeak);
-                _midDb = AudioMeter.LinearToDecibels(midPeak);
-                _trebleDb = AudioMeter.LinearToDecibels(treblePeak);
-            }
-
             // Záhlaví (včetně VU metrů) se kreslí až po změření úrovní výše.
             RenderDashboard();
             RenderStatusArea();
@@ -564,12 +657,23 @@ namespace PS150.UI.Windows
 
         private void ChangeVolume(int delta)
         {
-            _volume = Math.Clamp(_volume + delta, 0, 100);
+            SetVolume(_volume + delta);
+        }
+
+        private void SetVolume(int volume)
+        {
+            _volume = Math.Clamp(volume, 0, 100);
             _audioPlayer.Volume = _volume / 100.0f;
             _midiPlayer.SetVolume(_volume);
 
             _settings.Volume = _volume;
-            _settings.Save();
+            ScheduleSettingsSave();
+        }
+
+        private void ScheduleSettingsSave()
+        {
+            _settingsSaveTimer.Stop();
+            _settingsSaveTimer.Start();
         }
 
         private void UpdateFileTypeState()
@@ -731,13 +835,11 @@ namespace PS150.UI.Windows
                     StoreWindowPosition();                 // poloha starého režimu
                     _settings.Rotated90 = !_settings.Rotated90;
                     ApplyRotation(_settings.Rotated90);
-                    RestoreWindowPosition();               // poloha nového režimu (je-li uložená)
+                    if (!RestoreWindowPosition())          // poloha nového režimu (je-li uložená)
+                    {
+                        KeepOnScreen();                    // jinak aspoň nevyčnívat z obrazovky
+                    }
                     _settings.Save();
-                    break;
-
-                case Key.Insert:
-                    // NOVÉ: zadání hodnoty ladění (zároveň ladění zapne)
-                    BeginTuningInput();
                     break;
             }
             return true;
@@ -762,102 +864,97 @@ namespace PS150.UI.Windows
             _settings.TuningActive = tuning.Active;
             _settings.TuningTransposeSemitones = tuning.TransposeSemitones;
             _settings.TuningReferenceA4Hz = tuning.ReferenceA4Hz;
-            _settings.Save();
-
-            _grid.Clear();
+            ScheduleSettingsSave();
         }
 
-        private void BeginTuningInput()
+        // ------------------------------------------------------------------
+        // NOVÉ: textová pole formuláře (hlasitost, bicí, ladění, AJI)
+        // ------------------------------------------------------------------
+
+        private void CreateFormFields()
         {
-            _tuningBeforeInput = _tuning;   // pro Esc (vrácení původního ladění)
-            _tuningInputBuffer.Clear();
-            _tuningInputError = null;
-            _tuningInputActive = true;
-            _grid.Clear();
+            _fVolume = _form.Add(Parameter.Number(
+                "Vol", "%", 0, 100, 0, new[] { 1.0, 5.0, 10.0},
+                () => _volume,
+                v => SetVolume((int)Math.Round(v))));
+
+            _fDrums = _form.Add(Parameter.Toggle(
+                "Bicí",
+                () => _midiPlayer.DrumsEnabled,
+                on =>
+                {
+                    _midiPlayer.SetDrumsEnabled(on);
+                    _settings.DrumsEnabled = on;
+                    ScheduleSettingsSave();
+                }));
+
+            _fTuneOn = _form.Add(Parameter.Toggle(
+                "Lad",
+                () => _tuning.Active,
+                on => ApplyTuning(_tuning.WithActive(on))));
+
+            // Změna hodnoty ladění ho zároveň zapne (jako dřív zadání přes INSERT).
+            _fTranspose = _form.Add(Parameter.Number(
+                "T", "st",
+                -PlayerTuning.MaxTransposeSemitones, PlayerTuning.MaxTransposeSemitones, 2,
+                new[] { 0.01, 0.5, 1.0 },
+                () => _tuning.TransposeSemitones,
+                v => ApplyTuning(new PlayerTuning(true, v, _tuning.ReferenceA4Hz)),
+                showSign: true,
+                defaultValue: 0.0));   // ZMĚNA: '*' vrátí transpozici na nulu
+
+            _fA4 = _form.Add(Parameter.Number(
+                "A4", "Hz",
+                PlayerTuning.MinReferenceA4Hz, PlayerTuning.MaxReferenceA4Hz, 1,
+                new[] { 0.1, 1.0, 5.0 },
+                () => _tuning.ReferenceA4Hz,
+                v => ApplyTuning(new PlayerTuning(true, _tuning.TransposeSemitones, v)),
+                defaultValue: 440.0));   // ZMĚNA: '*' vrátí A4 na 440 Hz
+
+            _fAji = _form.Add(Parameter.Toggle(
+                "AJI",
+                () => _midiPlayer.AjiEnabled,
+                on =>
+                {
+                    _midiPlayer.SetAjiEnabled(on);
+                    _settings.AjiEnabled = on;
+                    ScheduleSettingsSave();
+                }));
         }
 
-        /// <summary>Esc při zadávání: zruší zadávání a vrátí ladění, které platilo před INSERT (i když se mezitím měnilo šipkami).</summary>
-        private void CancelTuningInput()
+        /// <summary>ZMĚNA: Shift = hrubý krok, Ctrl = jemný, jinak normální (klávesy +/- i kolečko).</summary>
+        private static StepSize CurrentStepSize()
         {
-            _tuningInputBuffer.Clear();
-            _tuningInputError = null;
-            _tuningInputActive = false;
-
-            bool changedMeanwhile =
-                _tuning.Active != _tuningBeforeInput.Active ||
-                _tuning.TransposeSemitones != _tuningBeforeInput.TransposeSemitones ||
-                _tuning.ReferenceA4Hz != _tuningBeforeInput.ReferenceA4Hz;
-
-            if (changedMeanwhile)
-            {
-                ApplyTuning(_tuningBeforeInput);   // uvnitř se mřížka vymaže
-            }
-            else
-            {
-                _grid.Clear();
-            }
+            var m = Keyboard.Modifiers;
+            if ((m & ModifierKeys.Shift) != 0) return StepSize.Coarse;
+            if ((m & ModifierKeys.Control) != 0) return StepSize.Fine;
+            return StepSize.Normal;
         }
 
-        /// <summary>
-        /// Šipka nahoru/dolů při zadávání: posune transpozici o celé
-        /// půltóny (zlomek se zachová: z +0.5 jde šipkou nahoru na +1.5)
-        /// a ladění tím zároveň zapne. Změna se projeví hned, za chodu.
-        /// Rozsah ±12 půltónů hlídá PlayerTuning. Referenční A4 se šipkami
-        /// nemění.
-        /// </summary>
-        private void NudgeTransposition(double deltaSemitones)
+        /// <summary>Klávesy, jejichž znak patří do textového pole (doručí ho TextInput, ne HandleInput).</summary>
+        private static bool IsFieldCharKey(Key key)
         {
-            _tuningInputBuffer.Clear();
-            _tuningInputError = null;
-
-            ApplyTuning(new PlayerTuning(
-                true,
-                _tuning.TransposeSemitones + deltaSemitones,
-                _tuning.ReferenceA4Hz));
+            return (key >= Key.D0 && key <= Key.D9)
+                || (key >= Key.NumPad0 && key <= Key.NumPad9)
+                || key == Key.OemPlus || key == Key.OemMinus
+                || key == Key.Add || key == Key.Subtract
+                || key == Key.OemPeriod || key == Key.OemComma || key == Key.Decimal
+                || key == Key.Multiply;
         }
 
-        /// <summary>ENTER při zadávání: přečte text, a když je v pořádku, použije ho. Prázdné pole = nechat to, co nastavily šipky. Při chybě zůstane zadávání otevřené a ukáže se důvod.</summary>
-        private void CommitTuningInput()
-        {
-            if (_tuningInputBuffer.Length == 0)
-            {
-                _tuningInputError = null;
-                _tuningInputActive = false;
-                _grid.Clear();
-                return;
-            }
-
-            if (PlayerTuning.TryParseInput(_tuningInputBuffer.ToString(), _tuning, out PlayerTuning parsed, out string error))
-            {
-                _tuningInputBuffer.Clear();
-                _tuningInputError = null;
-                _tuningInputActive = false;
-                ApplyTuning(parsed);
-            }
-            else
-            {
-                _tuningInputError = error;
-            }
-        }
-
-        /// <summary>Doručuje napsané znaky do zadávání ladění (jen když je aktivní). Povolené jsou číslice, + - . , a písmeno A.</summary>
+        /// <summary>Doručuje napsané znaky do zaostřeného textového pole.</summary>
         private void Window_TextInput(object sender, TextCompositionEventArgs e)
         {
-            if (!_tuningInputActive) return;
+            if (!_form.HasFocus) return;
 
             foreach (char c in e.Text)
             {
-                bool allowed = char.IsDigit(c) || c == '+' || c == '-' || c == '.' || c == ',' || c == 'a' || c == 'A';
-                if (allowed && _tuningInputBuffer.Length < 8)
-                {
-                    _tuningInputBuffer.Append(c);
-                    _tuningInputError = null;
-                }
+                _form.HandleChar(c, CurrentStepSize());
             }
 
             e.Handled = true;
+            RenderDashboard();
         }
-
 
         private bool EnsureRows(int desiredRows)
         {
@@ -996,12 +1093,17 @@ namespace PS150.UI.Windows
             _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
             _grid.WriteLine();
 
-            // ============ Řádek 3: čas, hlasitost, ladění, AJI, výstup ============
+            // ============ Řádek 3: čas, textová pole (hlasitost, bicí, ladění, AJI), stav ============
+            // Pole [ ] jsou ovladatelná myší (klik, kolečko), Tab, +/- a zadáním
+            // čísla - viz FieldForm v Core. Každé pole se při vykreslení ohlásí
+            // formuláři (Place), aby věděl, kam kliknout.
             TimeSpan current = _isMidiMode ? _midiPlayer.CurrentTime : _audioPlayer.CurrentTime;
             TimeSpan total = _isMidiMode ? _midiPlayer.TotalTime : _audioPlayer.TotalTime;
             string timeStr = $"{current:mm\\:ss}/{total:mm\\:ss}";
 
+            _form.BeginFrame();
             _grid.SetCursorPosition(0, 3);
+            _grid.ResetColor();
 
             void Segment(string text, ConsoleColor color)
             {
@@ -1009,30 +1111,77 @@ namespace PS150.UI.Windows
                 _grid.Write(text);
             }
 
+            void WriteField(FormField field, string label, string suffix)
+            {
+                _grid.ResetColor();
+                Segment(label, ConsoleColor.Cyan);
+
+                _form.Place(field, 3, _grid.CursorX, FieldForm.FieldWidth(field.Parameter));
+
+                switch (_form.StyleOf(field))
+                {
+                    case FieldStyle.Focused:
+                        _grid.BackgroundColor = ConsoleColor.Cyan;
+                        _grid.ForegroundColor = ConsoleColor.Black;
+                        break;
+                    case FieldStyle.Editing:
+                        _grid.BackgroundColor = ConsoleColor.Yellow;
+                        _grid.ForegroundColor = ConsoleColor.Black;
+                        break;
+                    case FieldStyle.Error:
+                        _grid.BackgroundColor = ConsoleColor.DarkRed;
+                        _grid.ForegroundColor = ConsoleColor.White;
+                        break;
+                    default:
+                        _grid.BackgroundColor = ConsoleColor.DarkBlue;
+                        _grid.ForegroundColor = ConsoleColor.White;
+                        break;
+                }
+
+                _grid.Write(_form.Display(field));
+                _grid.ResetColor();
+                Segment(suffix, ConsoleColor.Cyan);
+            }
+
             Segment($" {timeStr}  ", ConsoleColor.Cyan);
-            Segment($"Vol:{_volume,3}%  ", ConsoleColor.Cyan);
+            WriteField(_fVolume, "Vol ", "%  ");
 
             if (_isMidiMode)
             {
-                Segment(_midiPlayer.DrumsEnabled ? "D+  " : "D-  ", ConsoleColor.Cyan);
+                WriteField(_fDrums, "Bicí ", "  ");
             }
+
+            WriteField(_fTuneOn, "Lad ", "  ");
+            WriteField(_fTranspose, "T ", "st  ");
+            WriteField(_fA4, "A4 ", "Hz  ");
 
             if (_tuning.Active)
             {
-                Segment(_tuning.Describe().Trim() + "  ", ConsoleColor.Yellow);
+                Segment($"{_tuning.TotalCents:+0.0;-0.0;+0.0}c  ", ConsoleColor.Yellow);
             }
+
+            WriteField(_fAji, "AJI ", "  ");
 
             if (_isMidiMode && _midiPlayer.AjiEnabled)
             {
                 string ajiText = _midiPlayer.AjiAvailable
-                    ? $"AJI {PS150.Core.AjiPlanner.TemperamentLabel}: {_midiPlayer.AjiStatusText}"
-                    : "AJI: bez analyzy";
+                    ? $"{PS150.Core.AjiPlanner.TemperamentLabel}: {_midiPlayer.AjiStatusText}"
+                    : "bez analyzy";
                 Segment(ajiText + "  ", ConsoleColor.Cyan);
             }
 
             if (!_isMidiMode && _audioPlayer.UsesNetwork)
             {
                 Segment($"Vystup: ASRock {_audioPlayer.NetworkLatencyMs}ms  ", ConsoleColor.Green);
+            }
+
+            if (_form.Error != null)
+            {
+                Segment($"! {_form.Error}  ", ConsoleColor.Red);
+            }
+            else if (_form.HasFocus)
+            {
+                Segment("Tab=další  *=výchozí  Esc=pryč", ConsoleColor.DarkGray);   // ZMĚNA: krok už se netrvale nevolí
             }
 
             _grid.ResetColor();
@@ -1053,6 +1202,50 @@ namespace PS150.UI.Windows
         /// co se zrovna prohlíží/přehrává - varhanní panel na tom tedy nesmí
         /// záviset.
         /// </summary>
+        /// <summary>
+        /// NOVÉ: formulář MIDI vstupů. Jedno rozhraní = jeden řádek: vlevo stručné "MIDI"
+        /// (při víc rozhraních MIDI1, MIDI2...), hned za ním poslední události, nejnovější
+        /// úplně vpravo, starší se posouvají doleva. Odpojené rozhraní zešedne.
+        /// Zápis: 1:C4 100 = kanál 1, nota C4 stisknuta rychlostí 100; 1:C4 - = puštěna;
+        /// 10:36 100 = bicí (kanál 10 píše číslo noty); 1:CC64=127 = ovladač (pedál);
+        /// 1:PB+512 = pitch bend; 1:PG5 = změna programu.
+        /// </summary>
+        private void RenderMidiPortRows(MidiPortSnapshot[] ports)
+        {
+            const int labelWidth = 7;
+            int eventsWidth = Cols - labelWidth;
+
+            foreach (var port in ports)
+            {
+                bool on = port.Connected;
+
+                _grid.ForegroundColor = on ? ConsoleColor.Cyan : ConsoleColor.DarkGray;
+                _grid.Write(TextLayout.FitWidth(ports.Length > 1 ? $" MIDI{port.Index + 1}" : " MIDI", labelWidth));
+
+                // Co se vejde zprava: nejnovější událost je poslední, mezi událostmi dvě mezery.
+                var shown = new List<string>();
+                int used = 0;
+                for (int i = port.Recent.Length - 1; i >= 0; i--)
+                {
+                    int need = port.Recent[i].Length + (shown.Count > 0 ? 2 : 0);
+                    if (used + need > eventsWidth - 1) break;
+                    shown.Insert(0, port.Recent[i]);
+                    used += need;
+                }
+
+                string newest = shown.Count > 0 ? shown[shown.Count - 1] : "";
+                string older = shown.Count > 1 ? string.Join("  ", shown.Take(shown.Count - 1)) + "  " : "";
+                string pad = new string(' ', Math.Max(0, eventsWidth - older.Length - newest.Length));
+
+                _grid.ForegroundColor = on ? ConsoleColor.DarkGreen : ConsoleColor.DarkGray;
+                _grid.Write(pad + older);
+                _grid.ForegroundColor = on ? ConsoleColor.Yellow : ConsoleColor.DarkGray;
+                _grid.Write(newest);
+                _grid.ResetColor();
+                _grid.WriteLine();
+            }
+        }
+
         private void RenderStatusArea()
         {
             bool showOrganPanel = App.Input?.IsLiveDeviceConnected ?? false;
@@ -1088,11 +1281,12 @@ namespace PS150.UI.Windows
             }
 
             // Čas, hlasitost, ladění, AJI a výstup jsou už v řádku 3 záhlaví
-            // (viz RenderDashboard). Tady zbývá jen zadávání ladění (po INSERT:
-            // vstupní pole a nápověda / chyba), varhanní panel a MIDI osnovy.
-            int tuningRows = _tuningInputActive ? 2 : 0;
+            // (viz RenderDashboard, jsou to textová pole). Tady zbývá jen
+            // varhanní panel a MIDI osnovy.
+            // NOVÉ: formulář MIDI vstupů - jeden řádek na každé rozhraní (i odpojené, šedě).
+            MidiPortSnapshot[] midiPorts = App.Input?.GetPorts() ?? Array.Empty<MidiPortSnapshot>();
 
-            int totalRows = tuningRows + (showOrganPanel ? 5 : 0) + staffRows;
+            int totalRows = midiPorts.Length + (showOrganPanel ? 2 : 0) + staffRows;   // ZMĚNA: jen Reg a Akt, tři VU pásma (H/S/V) zrušena
             if (EnsureRows(HeaderRows + totalRows))
             {
                 RenderDashboard();
@@ -1100,55 +1294,10 @@ namespace PS150.UI.Windows
 
             _grid.SetCursorPosition(0, HeaderRows);
 
-            const int barWidth = 14;
-
-            // NOVÉ: zadávání hodnoty ladění (po klávese INSERT).
-            if (_tuningInputActive)
-            {
-                _grid.ForegroundColor = ConsoleColor.White;
-                _grid.Write(" Vstup:[");
-                _grid.ForegroundColor = ConsoleColor.Red;
-                _grid.Write(_tuningInputBuffer.ToString().PadRight(8));
-                _grid.ResetColor();
-                _grid.WriteLine(TextLayout.FitWidth("] Ent/Esc", Cols - 8 - 8));
-
-                if (_tuningInputError != null)
-                {
-                    _grid.ForegroundColor = ConsoleColor.Red;
-                    _grid.WriteLine(TextLayout.FitWidth($" {_tuningInputError}", Cols));
-                }
-                else
-                {
-                    _grid.ForegroundColor = ConsoleColor.DarkGray;
-                    _grid.WriteLine(TextLayout.FitWidth(" Up/Dn=+-1pt +0.5 A442", Cols));
-                }
-                _grid.ResetColor();
-            }
+            RenderMidiPortRows(midiPorts);
 
             if (showOrganPanel)
             {
-                string barBass = AudioMeter.RenderBar(_bassDb, barWidth);
-                string barMid = AudioMeter.RenderBar(_midDb, barWidth);
-                string barTreble = AudioMeter.RenderBar(_trebleDb, barWidth);
-
-                _grid.Write(" H:[");
-                _grid.ForegroundColor = ConsoleColor.Cyan;
-                _grid.Write(barBass);
-                _grid.ResetColor();
-                _grid.WriteLine(TextLayout.FitWidth($"]{_bassDb,5:F1}dB", Cols - 4 - barWidth));
-
-                _grid.Write(" S:[");
-                _grid.ForegroundColor = ConsoleColor.Cyan;
-                _grid.Write(barMid);
-                _grid.ResetColor();
-                _grid.WriteLine(TextLayout.FitWidth($"]{_midDb,5:F1}dB", Cols - 4 - barWidth));
-
-                _grid.Write(" V:[");
-                _grid.ForegroundColor = ConsoleColor.Cyan;
-                _grid.Write(barTreble);
-                _grid.ResetColor();
-                _grid.WriteLine(TextLayout.FitWidth($"]{_trebleDb,5:F1}dB", Cols - 4 - barWidth));
-
                 _grid.Write(" Reg:[");
                 _grid.ForegroundColor = ConsoleColor.Red;
                 _grid.Write(_registerInputBuffer.ToString().PadRight(3));

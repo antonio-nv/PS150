@@ -25,15 +25,12 @@ namespace PS150.Core.Generators
         private readonly LowPassFilter _lowPass = new LowPassFilter();
         private readonly HighPassFilter _highPass = new HighPassFilter();
         private readonly BandPassFilter _narrowBand = new BandPassFilter();
-        private readonly ThreeBandCrossover _crossover;
 
         private readonly DrumParameter _param;
         private readonly bool _found;
 
         public DrumVoice(VoicePreset preset, int noteNumber, double sampleRate) : base(sampleRate)
         {
-            _crossover = new ThreeBandCrossover(sampleRate);
-
             if (preset?.Envelope != null)
             {
                 NoteEnvelope.AttackTime = preset.Envelope.AttackTime;
@@ -78,7 +75,7 @@ namespace PS150.Core.Generators
 
         // Bicí nemají výšku tónu - GmNoteNumber (v konstruktoru) už vybral
         // zvuk, `frequency` se tu záměrně nepoužívá.
-        protected override BandSample CalculateWaveform(double frequency)
+        protected override double CalculateWaveform(double frequency)
         {
             if (!_found) return default; // Neznámé číslo noty v téhle sadě - ticho, ne pád
 
@@ -97,9 +94,7 @@ namespace PS150.Core.Generators
                 filtered = (float)_narrowBand.Process(raw);
             }
 
-            var split = _crossover.Process(filtered * (float)_param.Amplitude);
-
-            return new BandSample { Bass = split.Bass, Mid = split.Mid, Treble = split.Treble };
+            return filtered * (float)_param.Amplitude;   // ZMĚNA: mono, bez výhybky
         }
     }
 }

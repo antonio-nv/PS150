@@ -30,12 +30,6 @@ namespace PS150.Core.Generators
         private readonly double _gainA;
         private readonly double _gainB;
 
-        // Chiff je ŠUM (širokopásmový signál) - i po vytvarování registrovým
-        // _chiffFilter má reálnou šířku spektra, takže se (na rozdíl od
-        // sinusových harmonických) musí doopravdy rozdělit skutečnou výhybkou,
-        // ne jen zařadit podle jednoho kmitočtu.
-        private readonly ThreeBandCrossover _chiffCrossover;
-
         public OrganVoice(VoicePreset preset, double sampleRate) : base(sampleRate)
         {
             _preset = preset;
@@ -90,7 +84,6 @@ namespace PS150.Core.Generators
             NoteEnvelope.ReleaseTime = 0.03f;  // Rychlé vypnutí po uvolnění
 
             _chiffFilter.SetParams(_preset.ChiffFilterFreqHz, _preset.ChiffFilterQ, sampleRate);
-            _chiffCrossover = new ThreeBandCrossover(sampleRate);
         }
 
         public override void NoteOn()
@@ -99,9 +92,9 @@ namespace PS150.Core.Generators
             _chiffEnvelope = 1.0; // Reset obálky pro startovní zapraskání píšťaly
         }
 
-        protected override BandSample CalculateWaveform(double frequency)
+        protected override double CalculateWaveform(double frequency)
         {
-            BandSample bands = default;
+            double sum = 0.0;   // ZMĚNA: jeden mono signál místo tří pásem
 
             // AM/FM modulace (tremolo/vibrato) - společný pomalý LFO (ModSpeedHz),
             // podle ModType se uplatní buď na KMITOČET (FM = vibrato), nebo na
@@ -157,7 +150,7 @@ namespace PS150.Core.Generators
                 double freqA = effectiveFrequency;
                 double phaseA = AdvancePhase(ref _phasesA[i], ratio, freqA);
                 double valueA = Math.Sin(phaseA * 2.0 * Math.PI) * amp * amplitudeMultiplier * _gainA;
-                AddToBand(ref bands, freqA * ratio, valueA);
+                sum += valueA;
 
                 if (_chorusEnabled)
                 {
@@ -168,7 +161,7 @@ namespace PS150.Core.Generators
                     double freqB = effectiveFrequency * detuneRatio;
                     double phaseB = AdvancePhase(ref _phasesB[i], ratio, freqB);
                     double valueB = Math.Sin(phaseB * 2.0 * Math.PI) * amp * amplitudeMultiplier * _gainB;
-                    AddToBand(ref bands, freqB * ratio, valueB);
+                    sum += valueB;
                 }
             }
 
@@ -182,15 +175,12 @@ namespace PS150.Core.Generators
                 double noise = _noiseGen.NextSample((int)SampleRate);
                 double shapedChiff = _chiffFilter.Process(noise) * _chiffEnvelope * _preset.ChiffNoiseGain;
 
-                var split = _chiffCrossover.Process((float)shapedChiff);
-                bands.Bass += split.Bass;
-                bands.Mid += split.Mid;
-                bands.Treble += split.Treble;
+                sum += shapedChiff;
 
                 _chiffEnvelope *= Math.Exp(-1.0 / (SampleRate * _preset.ChiffDurationSec));
             }
 
-            return bands;
+            return sum;
         }
     }
 }

@@ -50,8 +50,6 @@ namespace PS150.Core.Generators
 
         // Tělo struny i pluck jsou širokopásmový signál - musí se doopravdy
         // rozdělit skutečnou výhybkou mezi hloubky/středy/výšky.
-        private readonly ThreeBandCrossover _toneCrossover;
-        private readonly ThreeBandCrossover _pluckCrossover;
 
         // Nepatrná rezonance ozvučné skříně - tenčí a "sušší" než u klavíru,
         // ale právě tahle přídavná barva dělá rozdíl mezi cembalem a holou
@@ -73,8 +71,6 @@ namespace PS150.Core.Generators
             ConfigureEnvelope();
 
             _pluckFilter.SetParams(3800.0, 2.0, sampleRate);
-            _toneCrossover = new ThreeBandCrossover(sampleRate);
-            _pluckCrossover = new ThreeBandCrossover(sampleRate);
 
             _bodyResonanceLow.SetParams(180.0, 3.5, sampleRate);
             _bodyResonanceHigh.SetParams(650.0, 2.5, sampleRate);
@@ -114,7 +110,7 @@ namespace PS150.Core.Generators
         public override bool IsFinished =>
             base.IsFinished || (HasStarted && _lastLevel < SilenceThresholdLinear);
 
-        protected override BandSample CalculateWaveform(double frequency)
+        protected override double CalculateWaveform(double frequency)
         {
             // Strunu rozezníme až tady, při prvním vzorku po NoteOn() - teprve
             // tady známe skutečný kmitočet (viz komentář v ToneEngine.NoteOn).
@@ -124,7 +120,7 @@ namespace PS150.Core.Generators
                 _stringExcited = true;
             }
 
-            BandSample bands = default;
+            double sum = 0.0;   // ZMĚNA: mono
 
             double stringSample = _string.NextSample();
 
@@ -133,10 +129,7 @@ namespace PS150.Core.Generators
 
             double toneSample = stringSample + body;
 
-            var toneSplit = _toneCrossover.Process((float)toneSample);
-            bands.Bass += toneSplit.Bass;
-            bands.Mid += toneSplit.Mid;
-            bands.Treble += toneSplit.Treble;
+            sum += toneSample;
 
             _lastLevel = _lastLevel * 0.999 + Math.Abs(stringSample) * 0.001;
 
@@ -146,15 +139,12 @@ namespace PS150.Core.Generators
                 double noise = _pluckNoise.NextSample((int)SampleRate);
                 double shapedPluck = _pluckFilter.Process(noise) * _pluckEnvelope * 0.25;
 
-                var split = _pluckCrossover.Process((float)shapedPluck);
-                bands.Bass += split.Bass;
-                bands.Mid += split.Mid;
-                bands.Treble += split.Treble;
+                sum += shapedPluck;
 
                 _pluckEnvelope *= Math.Exp(-1.0 / (SampleRate * PluckDurationSec));
             }
 
-            return bands;
+            return sum;
         }
     }
 }

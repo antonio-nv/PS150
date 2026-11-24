@@ -23,10 +23,8 @@ namespace PS150.Core.Generators
     /// nevinuté struny). Tohle jediné dodá tónu tu "živou", ne čistě
     /// syntetickou barvu, o kterou šlo od začátku.
     ///
-    /// KAŽDÝ partiál se díky přesně známému kmitočtu zařadí RO VNOU do
-    /// správného výstupního pásma (viz SynthVoice.AddToBand) - žádná filtrová
-    /// výhybka není potřeba, přesně jak to chcete u budoucích tří
-    /// syntezátorů/reproduktorových pásem bez výhybky.
+    /// Všechny partiály se prostě sečtou do jednoho mono signálu. Rozdělení do
+    /// pásem pro reproduktory řeší až výhybka na výstupu.
     /// </summary>
     public class AdditiveStringVoice : SynthVoice
     {
@@ -131,9 +129,9 @@ namespace PS150.Core.Generators
         public override bool IsFinished =>
             base.IsFinished || (HasStarted && _lastPeakPartialLevel < SilenceThresholdLinear);
 
-        protected override BandSample CalculateWaveform(double frequency)
+        protected override double CalculateWaveform(double frequency)
         {
-            BandSample bands = default;
+            double sum = 0.0;   // ZMĚNA: mono
             double peakLevel = 0.0;
 
             for (int i = 0; i < _partialRatiosIdeal.Length; i++)
@@ -149,7 +147,7 @@ namespace PS150.Core.Generators
 
                 double value = Math.Sin(phase * 2.0 * Math.PI) * level;
                 double partialFreq = frequency * stretchedRatio;
-                AddToBand(ref bands, partialFreq, value);
+                sum += value;
 
                 if (level > peakLevel) peakLevel = level;
             }
@@ -165,12 +163,12 @@ namespace PS150.Core.Generators
             {
                 double noise = _transientNoise.NextSample((int)SampleRate);
                 double shaped = _transientFilter.Process(noise) * _transientEnvelope * _transientGain;
-                AddToBand(ref bands, _transientFreqHz, shaped);
+                sum += shaped;
 
                 _transientEnvelope *= Math.Exp(-1.0 / (SampleRate * _transientDurationSec));
             }
 
-            return bands;
+            return sum;
         }
     }
 }

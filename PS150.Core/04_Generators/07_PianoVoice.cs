@@ -39,12 +39,6 @@ namespace PS150.Core.Generators
         private readonly BandPassFilter _hammerFilter = new BandPassFilter();
         private readonly double _hammerDurationSec = 0.008;
 
-        // Tělo struny (a hammer transient) je širokopásmový signál, ne čistá
-        // sinusovka - musí se doopravdy rozdělit skutečnou výhybkou mezi
-        // hloubky/středy/výšky (stejný princip jako u šumu jinde v projektu).
-        private readonly ThreeBandCrossover _toneCrossover;
-        private readonly ThreeBandCrossover _hammerCrossover;
-
         // Nepatrná rezonance ozvučné desky - dva rovnoběžné rezonátory přidané
         // k suchému zvuku struny, dodávají tělu tónu teplo/barvu.
         private readonly BandPassFilter _bodyResonanceLow = new BandPassFilter();
@@ -72,8 +66,6 @@ namespace PS150.Core.Generators
             ConfigureEnvelope();
 
             _hammerFilter.SetParams(450.0, 1.2, sampleRate);
-            _toneCrossover = new ThreeBandCrossover(sampleRate);
-            _hammerCrossover = new ThreeBandCrossover(sampleRate);
 
             _bodyResonanceLow.SetParams(90.0, 3.0, sampleRate);
             _bodyResonanceHigh.SetParams(420.0, 2.0, sampleRate);
@@ -114,7 +106,7 @@ namespace PS150.Core.Generators
         public override bool IsFinished =>
             base.IsFinished || (HasStarted && _lastLevel < SilenceThresholdLinear);
 
-        protected override BandSample CalculateWaveform(double frequency)
+        protected override double CalculateWaveform(double frequency)
         {
             // Strunu rozezníme až tady, při prvním vzorku po NoteOn() - teprve
             // tady známe skutečný kmitočet (viz komentář v ToneEngine.NoteOn).
@@ -136,7 +128,7 @@ namespace PS150.Core.Generators
                 _stringExcited = true;
             }
 
-            BandSample bands = default;
+            double sum = 0.0;   // ZMĚNA: mono
 
             float sA = _stringA.NextSample();
             float sB = _stringB.NextSample();
@@ -147,10 +139,7 @@ namespace PS150.Core.Generators
 
             double toneSample = stringSum + body;
 
-            var toneSplit = _toneCrossover.Process((float)toneSample);
-            bands.Bass += toneSplit.Bass;
-            bands.Mid += toneSplit.Mid;
-            bands.Treble += toneSplit.Treble;
+            sum += toneSample;
 
             // Pomalý průměr (EMA) hlasitosti struny - pro IsFinished, ať to
             // netiká zbytečně dál, když je zvuk už prakticky neslyšitelný.
@@ -162,15 +151,12 @@ namespace PS150.Core.Generators
                 double noise = _hammerNoise.NextSample((int)SampleRate);
                 double shapedHammer = _hammerFilter.Process(noise) * _hammerEnvelope * 0.35;
 
-                var split = _hammerCrossover.Process((float)shapedHammer);
-                bands.Bass += split.Bass;
-                bands.Mid += split.Mid;
-                bands.Treble += split.Treble;
+                sum += shapedHammer;
 
                 _hammerEnvelope *= Math.Exp(-1.0 / (SampleRate * _hammerDurationSec));
             }
 
-            return bands;
+            return sum;
         }
     }
 }

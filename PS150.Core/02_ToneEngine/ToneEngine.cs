@@ -13,6 +13,8 @@ namespace PS150.Core.ToneEngine
         public int RegisterNumber { get; set; } // Které číslo rejstříku tenhle hlas hraje
         public double Frequency { get; set; }   // Kmitočet v Hz (např. 261.63 Hz)
         public SynthVoice Voice { get; set; }   // Instance hlasu (Organ/Piano/Cembalo/Bell)
+        public InstrumentType Instrument { get; set; }   // NOVÉ: druh nástroje (bicí, klavír...) pro směrování a sustain
+        public bool PendingRelease { get; set; }         // NOVÉ: klávesa puštěna při sešlápnutém pedálu - uvolní se až s pedálem
     }
 
 
@@ -37,10 +39,19 @@ namespace PS150.Core.ToneEngine
         // nepoužíváme - pro spektrální analýzu potřebujeme signál beze zkreslení.
         private const double MasterGain = 0.3;
 
-        // Exponent kompenzace podle počtu znějících hlasů (viz GenerateNextBandSample).
+        // Exponent kompenzace podle počtu znějících hlasů (viz GenerateNextSample).
         private const double PolyphonyCompensationExponent = 0.5;
 
         public bool ClipDetected { get; private set; }
+
+        /// <summary>NOVÉ: MIDI kanál bicích (kanál 10 = index 9).</summary>
+        public const int DrumChannel = 9;
+
+        /// <summary>NOVÉ: číslo rejstříku bicí soupravy. Na kanálu 10 hraje VŽDY, ať je zapnutý nebo ne.</summary>
+        public const int DrumRegisterNumber = 700;
+
+        // NOVÉ: sustain pedál (CC64). Týká se jen klavírních hlasů (InstrumentType.Piano).
+        private bool _sustainDown;
 
         // --- REGISTR PRESETŮ (jediné místo, kam se musí ručně přidat nový rejstřík) ---
         // Až vytvoříš nový preset, přidej ho SEM do seznamu, jinak ho ToggleRegister
@@ -133,6 +144,7 @@ namespace PS150.Core.ToneEngine
                     {
                         if (note.RegisterNumber == number)
                         {
+                            note.PendingRelease = false;
                             note.Voice.NoteOff();
                         }
                     }
@@ -170,24 +182,41 @@ namespace PS150.Core.ToneEngine
         // 1. REAKCE NA MIDI / KLÁVESNICI (Volá se při stisku a pustití klávesy)
         // =========================================================================
 
-        public void NoteOn(int noteNumber)
+        /// <summary>
+        /// ZMĚNA: směrování podle MIDI kanálu a dynamika.
+        ///  - kanál 10 (index 9) hraje vždy bicí soupravu (rejstřík 700), číslo noty vybírá buben,
+        ///  - ostatní kanály hrají zapnuté rejstříky kromě bicích,
+        ///  - velocity (0..1) určuje hlasitost bicích, klavíru a dalších úhozových nástrojů
+        ///    (varhany dynamiku nemají).
+        /// </summary>
+        public void NoteOn(int noteNumber, int channel = 0, double velocity = 1.0)
         {
             lock (_lock)
             {
-                foreach (int registerNumber in _activeRegisters)
+                bool drumChannel = channel == DrumChannel;
+
+                IEnumerable<int> registers;
+                if (drumChannel)
+                    registers = new[] { DrumRegisterNumber };
+                else
+                    registers = _activeRegisters.ToArray();
+
+                foreach (int registerNumber in registers)
                 {
                     if (!_presetRegistry.TryGetValue(registerNumber, out var preset))
                         continue; // pro jistotu - nemělo by nastat
 
-                    // OPRAVA: kmitočet se teď počítá ZVLÁŠŤ pro každý rejstřík,
-                    // podle JEHO VLASTNÍ temperatury (preset.Temperament) - ne
-                    // jednou společně pro všechny rejstříky najednou jako
-                    // dřív. Díky tomu můžou dva rejstříky znít současně každý
-                    // v jiném ladění (např. jeden rovnoměrně, druhý
-                    // středotónově) - přesně jak to dělají skutečné varhany
-                    // s víc temperovanými soustavami píšťal.
+                    // Bicí na melodických kanálech nehrají (zapnutý rejstřík 700 by jinak
+                    // z každé klávesy dělal buben).
+                    if (!drumChannel && preset.Instrument == InstrumentType.Drums)
+                        continue;
+
+                    // Kmitočet se počítá zvlášť pro každý rejstřík podle jeho vlastní
+                    // temperatury (preset.Temperament).
                     double freq = 440.0 * Math.Pow(2.0, (noteNumber - 69) / 12.0)
                                 * Math.Pow(2.0, preset.Temperament.CentOffset(noteNumber) / 1200.0);
+
+                    double gain = VelocityGain(preset.Instrument, velocity);
 
                     // Pokud tahle kombinace (nota + rejstřík) už hraje, jen ji
                     // znovu "nadechneme" (retrigger), nevytváříme duplicitní instanci.
@@ -196,12 +225,15 @@ namespace PS150.Core.ToneEngine
 
                     if (existing != null)
                     {
+                        existing.Voice.Velocity = gain;
+                        existing.PendingRelease = false;
                         existing.Voice.NoteOn();
                         existing.Frequency = freq;
                         continue;
                     }
 
                     var voice = CreateVoice(preset, noteNumber, _sampleRate);
+                    voice.Velocity = gain;
                     voice.NoteOn();
 
                     _activeNotes.Add(new ActiveNote
@@ -209,23 +241,69 @@ namespace PS150.Core.ToneEngine
                         NoteNumber = noteNumber,
                         RegisterNumber = registerNumber,
                         Frequency = freq,
-                        Voice = voice
+                        Voice = voice,
+                        Instrument = preset.Instrument
                     });
                 }
             }
         }
 
-        public void NoteOff(int noteNumber)
+        public void NoteOff(int noteNumber, int channel = 0)
         {
+            // Bicí se NoteOff nezastavují - každý úder doznívá sám podle své obálky
+            // (elektronické bicí posílají NoteOff hned po úderu a ten by zvuk useknul).
+            if (channel == DrumChannel) return;
+
             lock (_lock)
             {
                 for (int i = 0; i < _activeNotes.Count; i++)
                 {
-                    if (_activeNotes[i].NoteNumber == noteNumber)
-                    {
-                        _activeNotes[i].Voice?.NoteOff();
-                    }
+                    var active = _activeNotes[i];
+                    if (active.NoteNumber != noteNumber || active.Instrument == InstrumentType.Drums) continue;
+
+                    // Sešlápnutý pedál drží klavírní noty, uvolní se až s ním.
+                    if (_sustainDown && active.Instrument == InstrumentType.Piano)
+                        active.PendingRelease = true;
+                    else
+                        active.Voice?.NoteOff();
                 }
+            }
+        }
+
+        /// <summary>NOVÉ: pedál sustain (MIDI CC64). Platí jen pro klavírní rejstříky, varhany a ostatní ho ignorují.</summary>
+        public void SetSustain(bool down)
+        {
+            lock (_lock)
+            {
+                _sustainDown = down;
+                if (down) return;
+
+                foreach (var active in _activeNotes)
+                {
+                    if (!active.PendingRelease) continue;
+                    active.PendingRelease = false;
+                    active.Voice?.NoteOff();
+                }
+            }
+        }
+
+        /// <summary>
+        /// NOVÉ: hlasitost podle dynamiky úhozu. Bicí jdou přímo podle velocity (slabý úder = tichý),
+        /// klavír a ostatní úhozové nástroje mají mírný základ, ať jemný úhoz úplně nezmizí.
+        /// Varhany dynamiku nemají.
+        /// </summary>
+        private static double VelocityGain(InstrumentType instrument, double velocity)
+        {
+            velocity = Math.Clamp(velocity, 0.0, 1.0);
+
+            switch (instrument)
+            {
+                case InstrumentType.Drums:
+                    return velocity;
+                case InstrumentType.Organ:
+                    return 1.0;
+                default:
+                    return 0.25 + 0.75 * velocity;
             }
         }
 
@@ -258,9 +336,13 @@ namespace PS150.Core.ToneEngine
         // 2. GENEROVÁNÍ ZVUKU PRO ZVUKOVKU (Volá audio karta v reálném čase)
         // =========================================================================
 
-        public BandSample GenerateNextBandSample()
+        /// <summary>
+        /// ZMĚNA: jeden mono vzorek (dřív tři pásma). Rozdělení na hloubky/středy/výšky
+        /// pro reproduktory patří až do výhybky na výstupu, ne do syntezátoru.
+        /// </summary>
+        public double GenerateNextSample()
         {
-            BandSample mixedSample = default;
+            double mixedSample = 0.0;
             int voiceCount;
 
             lock (_lock)
@@ -273,8 +355,7 @@ namespace PS150.Core.ToneEngine
 
                     if (activeNote?.Voice != null)
                     {
-                        BandSample sample = activeNote.Voice.GenerateSample(activeNote.Frequency);
-                        mixedSample += sample;
+                        mixedSample += activeNote.Voice.GenerateSample(activeNote.Frequency);
 
                         if (activeNote.Voice.IsFinished)
                         {
@@ -284,29 +365,17 @@ namespace PS150.Core.ToneEngine
                 }
             }
 
-            // Preventivní kompenzace podle počtu znějících hlasů (viz dřívější
-            // vysvětlení - N nezávislých zdrojů se sčítá jako √N, ne lineárně).
-            // Stejný jeden koeficient se aplikuje na všechna tři pásma najednou.
+            // Preventivní kompenzace podle počtu znějících hlasů (N nezávislých
+            // zdrojů se sčítá jako √N, ne lineárně).
             double compensation = voiceCount > 1
                 ? 1.0 / Math.Pow(voiceCount, PolyphonyCompensationExponent)
                 : 1.0;
 
-            BandSample gained = mixedSample * (MasterGain * compensation);
+            double gained = mixedSample * (MasterGain * compensation);
 
-            // Ořez se sleduje zvlášť pro každé pásmo - až každé pásmo poputuje
-            // na svůj vlastní D/A převodník/zesilovač, může přebudit i jen jedno
-            // z nich, zatímco ostatní budou v pořádku.
-            ClipDetected =
-                Math.Abs(gained.Bass) > 1.0 ||
-                Math.Abs(gained.Mid) > 1.0 ||
-                Math.Abs(gained.Treble) > 1.0;
+            ClipDetected = Math.Abs(gained) > 1.0;
 
-            return new BandSample
-            {
-                Bass = Math.Clamp(gained.Bass, -1.0, 1.0),
-                Mid = Math.Clamp(gained.Mid, -1.0, 1.0),
-                Treble = Math.Clamp(gained.Treble, -1.0, 1.0)
-            };
+            return Math.Clamp(gained, -1.0, 1.0);
         }
     }
 }

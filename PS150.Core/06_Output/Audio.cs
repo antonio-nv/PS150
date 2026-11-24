@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using PS150.Core.Generators;
 using PS150.Core.ToneEngine;
 using NAudio.Wave;
 
@@ -12,13 +11,9 @@ namespace PS150.Core.Output
         private WaveOutEvent? _waveOut;
         private readonly PS150.Core.ToneEngine.ToneEngine _synth;
 
-        // Špičkové úrovně od posledního čtení - zvlášť pro každé ze tří pásem
-        // (hloubky/středy/výšky), navíc jedna společná pro dnešní sloučený
-        // mono výstup. Stejný princip jako MaxLeftPeak/MaxRightPeak v AudioPlayer.cs.
+        // Špičková úroveň od posledního čtení (pro VU metr). Stejný princip
+        // jako MaxLeftPeak/MaxRightPeak v AudioPlayer.cs.
         private float _peakSinceLastRead;
-        private float _peakBass;
-        private float _peakMid;
-        private float _peakTreble;
 
         public WaveFormat WaveFormat { get; }
 
@@ -60,11 +55,9 @@ namespace PS150.Core.Output
 
         /// <summary>
         /// Callback od NAudio – plníme zvukový buffer vzorky z našeho PolySynthu.
-        /// ToneEngine teď vrací rovnou tři hotová pásma (hloubky/středy/výšky) -
-        /// každý hlas si je vyrábí sám (viz SynthVoice.CalculateWaveform), takže
-        /// se tu už nic dodatečně nefiltruje. Dokud nemáme HW se třemi výstupy
-        /// (Raspberry Pi + HiFiBerry DAC8x), pásma se tu jen sečtou zpátky do
-        /// jednoho mono signálu pro současnou PC zvukovku.
+        /// ZMĚNA: syntezátor je jediný mono, tři pásma jsou pryč. Dělení do pásem
+        /// pro dvou/třípásmovou reproduktorovou soustavu přijde jako výhybka až
+        /// na výstupu.
         /// </summary>
         public int Read(byte[] buffer, int offset, int count)
         {
@@ -73,13 +66,7 @@ namespace PS150.Core.Output
 
             for (int i = 0; i < sampleCount; i++)
             {
-                BandSample bands = _synth.GenerateNextBandSample();
-
-                TrackPeak(ref _peakBass, bands.Bass);
-                TrackPeak(ref _peakMid, bands.Mid);
-                TrackPeak(ref _peakTreble, bands.Treble);
-
-                float sample = (float)(bands.Bass + bands.Mid + bands.Treble);
+                float sample = (float)_synth.GenerateNextSample();
 
                 TrackPeak(ref _peakSinceLastRead, sample);
 
@@ -98,8 +85,6 @@ namespace PS150.Core.Output
         /// <summary>
         /// Vrátí nejvyšší absolutní úroveň vzorku od posledního volání a vynuluje počítadlo.
         /// Určeno pro VU metr (stejný princip jako AudioPlayer.ReadPeakLevels() u MP3 přehrávače).
-        /// Toto je úroveň CELKOVÉHO sloučeného signálu - pro jednotlivá pásma
-        /// použij ReadBandPeaks().
         /// </summary>
         public float ReadPeak()
         {
@@ -109,27 +94,7 @@ namespace PS150.Core.Output
         }
 
         /// <summary>
-        /// Vrátí špičkové úrovně všech tří kmitočtových pásem (hloubky/středy/výšky)
-        /// od posledního volání a vynuluje je. Určeno pro tři samostatné VU metry -
-        /// volej ve stejném rytmu jako ReadPeak(), např. z UI časovače.
-        /// </summary>
-        public (float Bass, float Mid, float Treble) ReadBandPeaks()
-        {
-            var result = (_peakBass, _peakMid, _peakTreble);
-            _peakBass = 0f;
-            _peakMid = 0f;
-            _peakTreble = 0f;
-            return result;
-        }
-
-        /// <summary>Dělící kmitočet hloubky/středy v Hz (zatím pevný, viz SynthVoice).</summary>
-        public double LowCrossoverHz => SynthVoice.LowCrossoverHz;
-
-        /// <summary>Dělící kmitočet středy/výšky v Hz (zatím pevný, viz SynthVoice).</summary>
-        public double HighCrossoverHz => SynthVoice.HighCrossoverHz;
-
-        /// <summary>
-        /// True, pokud poslední vygenerovaný vzorek v NĚKTERÉM z pásem přesáhl
+        /// True, pokud poslední vygenerovaný vzorek přesáhl
         /// rozsah -1.0..1.0 (tedy došlo k oříznutí). Průchozí hodnota ze ToneEngine.
         /// </summary>
         public bool ClipDetected => _synth.ClipDetected;
