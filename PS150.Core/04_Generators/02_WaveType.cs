@@ -29,8 +29,9 @@
         NarrowBandpass  // Bílý šum -> rezonanční úzkopásmový filtr (CenterHz, Q) - tónově rozeznatelný "bouchanec" (bubny, tomy, konga...)
     }
 
-    // Jeden bicí zvuk v rámci rejstříku 700 (viz VoicePreset.DrumParameters a
-    // _700_Drums.cs). GmNoteNumber je to, PODLE ČEHO se v DrumVoice vybírá
+    // Jeden bicí zvuk v rámci bicího rejstříku (viz VoicePreset.DrumParameters
+    // a krok40: 03_Percussion/_001_Drums.cs, banka 9 - Banky.cs
+    // _009_SynteticBici). GmNoteNumber je to, PODLE ČEHO se v DrumVoice vybírá
     // (číslo MIDI noty na kanálu D10, 35-81), ne podle frekvence noty -
     // bicí totiž nemají výšku tónu jako ostatní nástroje, číslo noty přímo
     // VYBÍRÁ zvuk (kopák/virbl/hi-hat...), nepřepočítává se na kmitočet.
@@ -148,9 +149,10 @@
         public AdsrEnvelope Envelope { get; set; } = null;
 
         // --- Parametry pro Instrument == Drums (viz DrumVoice.cs) - jeden
-        // rejstřík (typicky Number=700) nese CELOU bicí soupravu, zvuk se
-        // vybírá podle GmNoteNumber (35-81), ne podle frekvence/noty jako
-        // u ostatních nástrojů. ---
+        // rejstřík (krok40: typicky vlastní bicí banka, viz Banky.cs
+        // _009_SynteticBici) nese CELOU bicí soupravu, zvuk se vybírá podle
+        // GmNoteNumber (35-81), ne podle frekvence/noty jako u ostatních
+        // nástrojů. ---
         public DrumParameter[] DrumParameters { get; set; } = null;
 
         // --- Parametry pro Instrument == Piano/Cembalo (fyzikální model struny,

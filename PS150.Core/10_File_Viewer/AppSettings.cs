@@ -46,6 +46,14 @@ namespace PS150.Core
         // podle Program Change v souboru. Viz GmPianoMidiPlayer.SetMidiMelodicRegister.
         public int MidiMelodicRegister { get; set; } = 1;
 
+        // krok37: totéž, ale pro bicí sadu (kit) na kanálu D10 - "lidské" GM/GS
+        // číslování 1-128 (1 = Standard kit P000 = staré natvrdo zapsané
+        // chování). 0 = žádný vynucený rejstřík - hraje skutečná sada podle
+        // Program Change na kanálu D10 v souboru. Viz GmPianoMidiPlayer.
+        // SetMidiDrumRegister / Sf2MidiSynth.SetDrumProgram. U OPL banky
+        // (SoundBlaster) se neprojeví - formát .op2 nemá víc bicích sad.
+        public int MidiDrumRegister { get; set; } = 1;
+
         // NOVÉ: okno přehrávače otočené o 90 stupňů (klávesa r).
         public bool Rotated90 { get; set; } = false;
 

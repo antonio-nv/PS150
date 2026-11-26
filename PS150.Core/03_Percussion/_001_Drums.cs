@@ -1,22 +1,37 @@
-﻿using PS150.Core.Generators;
+using PS150.Core.Generators;
 
 namespace PS150.Core.Tones
 {
     /// <summary>
-    /// Rejstřík 700 - syntetizovaná bicí souprava GM (noty 35-81), viz
-    /// DrumVoice.cs. Číslo MIDI noty vybírá KTERÝ zvuk zazní (kopák,
-    /// virbl, hi-hat...), ne výšku tónu.
+    /// krok39: přesunuto z PS150.Core/03_Tones/_700_Drums.cs do vlastního
+    /// adresáře 03_Percussion (vedle 03_Tones) - odděleně od tónových
+    /// rejstříků, ze stejného důvodu jako dřív oddělení tónové/bicí banky u
+    /// přehrávače .mid souborů (viz Sf2MidiSynth/OplMidiSynth). Soubor i
+    /// třída přejmenovány z _700_Drums na _001_Drums (první soubor v novém
+    /// adresáři). Jmenný prostor ponechán beze změny (PS150.Core.Tones).
+    ///
+    /// krok40: bicí teď žijí ve VLASTNÍ bance (_009_SynteticBici, viz
+    /// Banky.cs) - nezávislé číslování rejstříků na bance 1 (tóny), přesně
+    /// jako u jednoúčelového bicího modulu, co nemá vedle sebe žádnou
+    /// melodickou banku, s kterou by si mohl kolidovat. Díky tomu teď číslo
+    /// rejstříku sedí s názvem souboru/třídy: Number = 1 (dřív 700, to bylo
+    /// jen kvůli sdílené bance 1 s Bombard16 a spol. - viz ToneEngine.
+    /// DrumRegister, kde se registruje do banky 9, ne 1).
+    ///
+    /// Syntetizovaná bicí souprava GM (noty 35-81), viz DrumVoice.cs. Číslo
+    /// MIDI noty vybírá KTERÝ zvuk zazní (kopák, virbl, hi-hat...), ne výšku
+    /// tónu.
     ///
     /// Kmitočty/Q/šířky pásem níž jsou první odhad podle skutečných
     /// akustických rozsahů daných nástrojů (ne změřené/doladěné poslechem)
     /// - klidně to poslechem doupravuj, obzvlášť Q u NarrowBandpass, který
     /// zásadně ovlivňuje, jak dlouho a "tónově" daný buben dozvučí.
     /// </summary>
-    public static class _700_Drums
+    public static class _001_Drums
     {
         public static readonly VoicePreset Preset = new VoicePreset
         {
-            Number = 700,
+            Number = 1,
             Name = "Drums GM",
             Instrument = InstrumentType.Drums,
             DrumParameters = new[]

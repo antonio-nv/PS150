@@ -13,16 +13,21 @@ namespace PS150.Core.Sampler
 {
     /// <summary>
     /// krok18: stereo sampler pro přehrávání .mid souborů z banky SF2 (MuseScore_General).
-    /// Všechny kanály hrají klavír B000:P000 "Grand Piano", kanál 10 hraje bicí B128:P000 "Standard"
-    /// (GM standardní souprava, hi-hat se vzájemně umlčuje přes exkluzivní třídy).
+    /// Netbicí kanály hrají buď vynucený univerzální rejstřík, nebo skutečné nástroje
+    /// podle Program Change (viz ISupportsMelodicRegister). Kanál 10 (bicí) obdobně
+    /// hraje buď vynucenou bicí sadu (kit), nebo skutečnou sadu podle Program Change
+    /// na kanálu D10 (viz ISupportsDrumRegister, krok37 - typicky GS konvence P000
+    /// Standard/P008 Room/P016 Power/P024 Electronic/P025 TR-808/P032 Jazz/P040
+    /// Brush/P048 Orchestra, pokud je banka obsahuje). Hi-hat se uvnitř jedné sady
+    /// vzájemně umlčuje přes exkluzivní třídy.
     ///
     /// Zpracovává to, co přehrávač posílá: NoteOn/Off, CC7 (hlasitost), CC11 (expression), CC10 (pan -
     /// ping-pong levý/pravý kanál zůstává), CC64 (pedál), CC120/123 (vše ticho), CC121 (reset),
-    /// pitch bend (±2 půltóny; přes něj přehrávač dělá ladění a AJI). Program Change se ignoruje.
+    /// pitch bend (±2 půltóny; přes něj přehrávač dělá ladění a AJI).
     ///
     /// Vlastní stereo výstup přes WaveOutEvent; výhledově půjde výstup do společné sběrnice s DSP.
     /// </summary>
-    public sealed class Sf2MidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister
+    public sealed class Sf2MidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister
     {
         private const int Rate = 44100;
         private const int DrumChannel = 9;
@@ -45,8 +50,18 @@ namespace PS150.Core.Sampler
         // GetMelodicPreset, píše se z UI vlákna (FileBrowserWindow).
         private volatile Sf2Preset? _forcedMelodic;               // null = respektuj Program Change ze souboru
         private readonly Dictionary<int, Sf2Preset> _melodicByProgram;   // B000:Pxxx podle GM programu (0-127), pro skutečné rejstříky
-        private readonly int[] _channelProgram = new int[16];     // krok31: poslední Program Change na kanálu (jen když _forcedMelodic == null)
-        private readonly Sf2Preset? _drums;
+        private readonly int[] _channelProgram = new int[16];     // krok31: poslední Program Change na kanálu (jen když _forcedMelodic == null); krok37: u kanálu D10 totéž pro bicí sadu
+
+        // krok37: stejná logika jako u _forcedMelodic/_melodicByProgram výš, jen
+        // pro bicí sadu (kit) na kanálu D10 - viz SetDrumProgram/ISupportsDrumRegister.
+        // Banky typu MuseScore_General mívají v bance 128 víc sad podle GS konvence
+        // (P000 Standard, P008 Room, P016 Power, P024 Electronic, P025 TR-808,
+        // P032 Jazz, P040 Brush, P048 Orchestra) - dřív se na ně nedalo dostat,
+        // protože Program Change na kanálu D10 se úplně ignoroval a hrálo se
+        // vždycky natvrdo P000.
+        private readonly Sf2Preset? _defaultDrums;                // B128:P000 - záloha, když se nenajde konkrétní sada/program
+        private volatile Sf2Preset? _forcedDrum;                  // null = respektuj Program Change ze souboru (kanál D10)
+        private readonly Dictionary<int, Sf2Preset> _drumsByProgram;   // B128:Pxxx podle GS konvence sad
         private readonly object _lock = new object();
         private readonly List<Voice> _voices = new List<Voice>();
 
@@ -90,13 +105,14 @@ namespace PS150.Core.Sampler
         private readonly string _description;
         public string Description => _description;
 
-        private Sf2MidiSynth(Sf2Preset defaultMelodic, Sf2Preset? drums,
-            Dictionary<int, Sf2Preset> melodicByProgram, string description)
+        private Sf2MidiSynth(Sf2Preset defaultMelodic, Sf2Preset? defaultDrums,
+            Dictionary<int, Sf2Preset> melodicByProgram, Dictionary<int, Sf2Preset> drumsByProgram, string description)
         {
             _defaultMelodic = defaultMelodic;
             _description = description;
-            _drums = drums;
+            _defaultDrums = defaultDrums;
             _melodicByProgram = melodicByProgram;
+            _drumsByProgram = drumsByProgram;
         }
 
         /// <summary>krok34: ISupportsMelodicRegister - přepne univerzální rejstřík ZA BĚHU (bez přerušení přehrávání).</summary>
@@ -113,6 +129,19 @@ namespace PS150.Core.Sampler
             _forcedMelodic = _melodicByProgram.TryGetValue(gmProgram, out var p) ? p : _defaultMelodic;
         }
 
+        /// <summary>krok37: ISupportsDrumRegister - přepne vynucenou bicí sadu (kit) ZA BĚHU, stejná logika jako SetUniversalProgram výš, jen pro kanál D10.</summary>
+        public void SetDrumProgram(int drumProgram)
+        {
+            if (drumProgram == 0)
+            {
+                _forcedDrum = null;
+                return;
+            }
+
+            int gmProgram = Math.Clamp(drumProgram, 1, 128) - 1;
+            _forcedDrum = _drumsByProgram.TryGetValue(gmProgram, out var p) ? p : _defaultDrums;
+        }
+
         /// <summary>
         /// Vytvoří a rozběhne syntezátor z načtené banky SF2 (viz Sf2Loader.GetBank).
         /// Vrací null, když banka ještě není načtená nebo v ní chybí klavír B000:P000.
@@ -122,25 +151,29 @@ namespace PS150.Core.Sampler
         /// Piano, odpovídá starému natvrdo zapsanému chování). 0 = žádný
         /// univerzální rejstřík - hrají skutečné nástroje podle Program Change
         /// v souboru (viz GetMelodicPreset).
+        /// krok37: drumProgram - totéž, ale pro bicí sadu (kit) na kanálu D10,
+        /// "lidské" GM/GS číslování 1-128 (1 = Standard kit P000, staré natvrdo
+        /// zapsané chování). 0 = hraje skutečná sada podle Program Change v
+        /// souboru (viz GetDrumPreset).
         /// </summary>
-        public static Sf2MidiSynth? TryCreate(int bankNumber, int universalProgram = 1)
+        public static Sf2MidiSynth? TryCreate(int bankNumber, int universalProgram = 1, int drumProgram = 1)
         {
             var bank = Sf2Loader.GetBank(bankNumber);
             if (bank == null) return null;
-            return Create(bank, true, universalProgram, bankNumber);
+            return Create(bank, true, universalProgram, drumProgram, bankNumber);
         }
 
         /// <summary>krok20: syntezátor bez zvukové karty (pro diagnostické vykreslení do WAV, viz Sf2Render).</summary>
-        public static Sf2MidiSynth? CreateOffline(Sf2Bank bank) => Create(bank, false, 1, null);
+        public static Sf2MidiSynth? CreateOffline(Sf2Bank bank) => Create(bank, false, 1, 1, null);
 
         // krok32: bankNumber jen kvůli popisku (Description) - viz BankTable.Find níž.
         // null, když ho nemáme po ruce (CreateOffline) - pak se vezme aspoň jméno souboru.
-        private static Sf2MidiSynth? Create(Sf2Bank bank, bool play, int universalProgram, int? bankNumber)
+        private static Sf2MidiSynth? Create(Sf2Bank bank, bool play, int universalProgram, int drumProgram, int? bankNumber)
         {
             var defaultMelodic = bank.Presets.FirstOrDefault(p => p.Bank == 0 && p.Program == 0);
             if (defaultMelodic == null) return null;
 
-            var drums = bank.Presets.FirstOrDefault(p => p.Bank == 128 && p.Program == 0);
+            var defaultDrums = bank.Presets.FirstOrDefault(p => p.Bank == 128 && p.Program == 0);
 
             // krok31: všechny melodické (B000) rejstříky podle GM programu - pro
             // skutečné nástroje ze souboru i pro vynucený univerzální rejstřík.
@@ -149,11 +182,19 @@ namespace PS150.Core.Sampler
                 .GroupBy(p => p.Program)
                 .ToDictionary(g => g.Key, g => g.First());
 
+            // krok37: totéž, ale pro bicí sady (B128) - typicky GS konvence
+            // P000/008/016/024/025/032/040/048, viz ISupportsDrumRegister.
+            var drumsByProgram = bank.Presets
+                .Where(p => p.Bank == 128)
+                .GroupBy(p => p.Program)
+                .ToDictionary(g => g.Key, g => g.First());
+
             string description = (bankNumber.HasValue ? BankTable.Find(bankNumber.Value)?.FullName : null)
                 ?? Path.GetFileNameWithoutExtension(bank.Path);
 
-            var synth = new Sf2MidiSynth(defaultMelodic, drums, melodicByProgram, $"{description} (SF2)");
+            var synth = new Sf2MidiSynth(defaultMelodic, defaultDrums, melodicByProgram, drumsByProgram, $"{description} (SF2)");
             synth.SetUniversalProgram(universalProgram);   // krok34: stejná metoda jako pro živou změnu za běhu
+            synth.SetDrumProgram(drumProgram);             // krok37: totéž pro bicí sadu
             if (play)
             {
                 // krok20: větší rezerva (150 ms) proti přerušování zvuku; u přehrávání souborů na latenci nezáleží.
@@ -231,9 +272,18 @@ namespace PS150.Core.Sampler
             return _melodicByProgram.TryGetValue(program, out var preset) ? preset : _defaultMelodic;
         }
 
+        /// <summary>krok37: bicí sada (kit) pro kanál D10 - buď vynucená (SetDrumProgram), nebo podle posledního Program Change na kanálu D10.</summary>
+        private Sf2Preset? GetDrumPreset()
+        {
+            if (_forcedDrum != null) return _forcedDrum;
+
+            int program = _channelProgram[DrumChannel];
+            return _drumsByProgram.TryGetValue(program, out var preset) ? preset : _defaultDrums;
+        }
+
         private void StartNote(int channel, int note, int velocity)
         {
-            var preset = channel == DrumChannel ? _drums : GetMelodicPreset(channel);
+            var preset = channel == DrumChannel ? GetDrumPreset() : GetMelodicPreset(channel);
             if (preset == null) return;
 
             var zones = preset.Match(note, velocity);

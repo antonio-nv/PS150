@@ -20,11 +20,20 @@
         public string FullName => $"{Number:000} {Name}";
     }
 
-    /// <summary>Banka 1 - Syntetické zvuky (Melzerovy varhany Kutná Hora, klavíry, cembala, zvony, smyčce, bicí). Melzer 1-200 podle hracího stolu (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon Zikmund, 500/501 aditivní, 600 smyčce, 700 bicí.</summary>
+    /// <summary>
+    /// Banka 1 - Syntetické zvuky, TÓNY (Melzerovy varhany Kutná Hora,
+    /// klavíry, cembala, zvony, smyčce). Melzer 1-200 podle hracího stolu
+    /// (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon
+    /// Zikmund, 500/501 aditivní, 600 smyčce.
+    /// krok40: bicí se odsud ODSTĚHOVALY do vlastní banky 9 (viz
+    /// _009_SynteticBici níž) - nezávislé číslování, žádná kolize s
+    /// melodickými rejstříky (dřív bicí = rejstřík 700 v týž bance, teď
+    /// úplně jiná banka, takže klidně může mít číslo 1 jako tady Bombard16).
+    /// </summary>
     public static class _001_SyntetickeZvuky
     {
         public const int Number = 1;
-        public static readonly BankInfo Info = new BankInfo(Number, "Syntetické zvuky (Melzerovy varhany Kutná Hora, klavíry, cembala, zvony, smyčce, bicí)", BankKind.Synthetic, "Melzer 1-200 podle hracího stolu (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon Zikmund, 500/501 aditivní, 600 smyčce, 700 bicí.");
+        public static readonly BankInfo Info = new BankInfo(Number, "Syntetické zvuky, tóny (Melzerovy varhany Kutná Hora, klavíry, cembala, zvony, smyčce)", BankKind.Synthetic, "Melzer 1-200 podle hracího stolu (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon Zikmund, 500/501 aditivní, 600 smyčce. Bicí viz banka 9.");
     }
 
     /// <summary>Banka 2 - General MIDI (Microsoft GS Wavetable). Programy 1-128 podle GM; zatím hraje jen přehrávač .mid.</summary>
@@ -76,6 +85,19 @@
         public static readonly BankInfo Info = new BankInfo(Number, "SoundBlaster (OPL3)", BankKind.SoundFont, "OPL3 emulace (NukedOpl) s GM instrumentální sadou z .op2/GENMIDI banky (DMXOPL apod.) - pro hrubou orientaci v prohlížeči souborů.");
     }
 
+    /// <summary>
+    /// krok40: Banka 9 - Syntetické zvuky, BICÍ (stejná syntéza jako banka 1,
+    /// ale úplně NEZÁVISLÉ číslování rejstříků - viz PS150.Core/03_Percussion/
+    /// _001_Drums.cs). Přesně jako u jednoúčelového bicího modulu: žádná
+    /// melodická banka vedle sebe neexistuje, takže se číslo rejstříku může
+    /// volit úplně svobodně od 1, bez ohledu na cokoliv v bance 1.
+    /// </summary>
+    public static class _009_SynteticBici
+    {
+        public const int Number = 9;
+        public static readonly BankInfo Info = new BankInfo(Number, "Syntetické zvuky, bicí (GM souprava, noty 35-81)", BankKind.Synthetic, "Vlastní, nezávislé číslování rejstříků bicích souprav - viz PS150.Core/03_Percussion. Dnes jen rejstřík 1 (GM souprava); časem klidně i další.");
+    }
+
     /// <summary>Seznam všech bank (nová banka = nová třída výš + řádek zde).</summary>
     public static class BankTable
     {
@@ -89,6 +111,7 @@
             _006_KORG.Info,
             _007_Amiga.Info,
             _008_SoundBlaster.Info,
+            _009_SynteticBici.Info,
         };
 
         public static BankInfo? Find(int number)

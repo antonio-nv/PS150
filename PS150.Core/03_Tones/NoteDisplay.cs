@@ -19,12 +19,13 @@ namespace PS150.Core.Tones
 
         /// <summary>
         /// Zkratka GM bicího (kanál D10) podle čísla noty - stejná tabulka
-        /// jako u syntézy (_700_Drums.cs), takže se zobrazení nemůže
-        /// rozejít s tím, co skutečně hraje.
+        /// jako u syntézy (krok39: 03_Percussion/_001_Drums.cs, dřív
+        /// 03_Tones/_700_Drums.cs), takže se zobrazení nemůže rozejít s
+        /// tím, co skutečně hraje.
         /// </summary>
         public static string DrumAbbreviation(int noteNumber)
         {
-            foreach (var p in _700_Drums.Preset.DrumParameters)
+            foreach (var p in _001_Drums.Preset.DrumParameters)
             {
                 if (p.GmNoteNumber == noteNumber) return p.Abbreviation;
             }

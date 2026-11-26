@@ -51,8 +51,17 @@ namespace PS150.Core.ToneEngine
         /// <summary>NOVÉ: MIDI kanál bicích (kanál 10 = index 9).</summary>
         public const int DrumChannel = 9;
 
-        /// <summary>krok15: rejstřík bicí soupravy = banka 001 (Syntetické zvuky), číslo 700. Na kanálu 10 hraje VŽDY, ať je zapnutý nebo ne.</summary>
-        public static readonly RegisterId DrumRegister = new RegisterId(_001_SyntetickeZvuky.Number, 700);
+        /// <summary>
+        /// krok15: rejstřík bicí soupravy. Na kanálu 10 hraje VŽDY, ať je
+        /// zapnutý nebo ne. krok40: bicí mají VLASTNÍ banku (9 - Syntetické
+        /// bicí, viz Banky.cs _009_SynteticBici), nezávislou na bance 1
+        /// (tóny) - stejně jako u jednoúčelového bicího modulu žádná
+        /// melodická banka vedle sebe neexistuje, takže se mohlo číslo
+        /// rejstříku přečíslovat z 700 na 1 (sedí teď i s názvem souboru
+        /// PS150.Core/03_Percussion/_001_Drums.cs), beze strachu z kolize s
+        /// Bombard16 (banka 1, taky číslo 1).
+        /// </summary>
+        public static readonly RegisterId DrumRegister = new RegisterId(_009_SynteticBici.Number, 1);
 
         // NOVÉ: sustain pedál (CC64). Týká se jen klavírních hlasů (InstrumentType.Piano).
         private bool _sustainDown;
@@ -62,9 +71,14 @@ namespace PS150.Core.ToneEngine
         // podle čísla nenajde.
         private static readonly ConcurrentDictionary<RegisterId, VoicePreset> _presetRegistry = new ConcurrentDictionary<RegisterId, VoicePreset>(BuildRegistry());
 
+        // krok40: tóny (banka 1) a bicí (banka 9) jsou teď dvě NEZÁVISLÉ
+        // číselné osy (viz Banky.cs _001_SyntetickeZvuky/_009_SynteticBici) -
+        // RegisterPresets níž je spojuje dohromady do jednoho _presetRegistry,
+        // ale kolize se hlídá jen uvnitř stejné banky, takže třeba Bombard16
+        // (banka 1, číslo 1) a bicí (banka 9, číslo 1) si navzájem nepřekáží.
         private static Dictionary<RegisterId, VoicePreset> BuildRegistry()
         {
-            var presets = new VoicePreset[]
+            var tonalPresets = new VoicePreset[]
             {
                 _001_Bombard16.Preset,
                 _002_ViolnBas16.Preset,
@@ -78,11 +92,27 @@ namespace PS150.Core.ToneEngine
                 _501_Cembalo_Additivni.Preset,
                 _400_Zvon_Zikmund.Preset,
                 _600_Strings.Preset,
-                _700_Drums.Preset,
+            };
+
+            var drumPresets = new VoicePreset[]
+            {
+                _001_Drums.Preset,   // krok40: banka 9 (Syntetické bicí), viz PS150.Core/03_Percussion/_001_Drums.cs
             };
 
             var dict = new Dictionary<RegisterId, VoicePreset>();
+            RegisterPresets(dict, _001_SyntetickeZvuky.Number, tonalPresets);
+            RegisterPresets(dict, _009_SynteticBici.Number, drumPresets);
+            return dict;
+        }
 
+        /// <summary>
+        /// krok40: zaregistruje seznam presetů do JEDNÉ konkrétní banky -
+        /// volá se zvlášť pro tóny (banka 1) a zvlášť pro bicí (banka 9),
+        /// takže se kolize čísel hlídá jen uvnitř stejné banky, nikdy napříč
+        /// (viz BuildRegistry výš).
+        /// </summary>
+        private static void RegisterPresets(Dictionary<RegisterId, VoicePreset> dict, int bank, VoicePreset[] presets)
+        {
             foreach (var preset in presets)
             {
                 if (preset.Number <= 0)
@@ -92,8 +122,7 @@ namespace PS150.Core.ToneEngine
                     continue;
                 }
 
-                // krok17b: všechny presety tady jsou syntetické = banka 001; (banka, číslo) je klíč registru.
-                var id = new RegisterId(_001_SyntetickeZvuky.Number, preset.Number);
+                var id = new RegisterId(bank, preset.Number);
 
                 if (dict.ContainsKey(id))
                 {
@@ -105,8 +134,6 @@ namespace PS150.Core.ToneEngine
 
                 dict[id] = preset;
             }
-
-            return dict;
         }
 
         // Parametr temperament tu zůstává kvůli zpětné kompatibilitě (kdyby ho
@@ -257,7 +284,7 @@ namespace PS150.Core.ToneEngine
 
         /// <summary>
         /// ZMĚNA: směrování podle MIDI kanálu a dynamika.
-        ///  - kanál 10 (index 9) hraje vždy bicí soupravu (rejstřík 700), číslo noty vybírá buben,
+        ///  - kanál 10 (index 9) hraje vždy bicí soupravu (DrumRegister, banka 9 - viz Banky.cs), číslo noty vybírá buben,
         ///  - ostatní kanály hrají zapnuté rejstříky kromě bicích,
         ///  - velocity (0..1) určuje hlasitost bicích, klavíru a dalších úhozových nástrojů
         ///    (varhany dynamiku nemají).
@@ -279,7 +306,7 @@ namespace PS150.Core.ToneEngine
                     if (!_presetRegistry.TryGetValue(registerNumber, out var preset))
                         continue; // pro jistotu - nemělo by nastat
 
-                    // Bicí na melodických kanálech nehrají (zapnutý rejstřík 700 by jinak
+                    // Bicí na melodických kanálech nehrají (zapnutý bicí rejstřík by jinak
                     // z každé klávesy dělal buben).
                     if (!drumChannel && preset.Instrument == InstrumentType.Drums)
                         continue;

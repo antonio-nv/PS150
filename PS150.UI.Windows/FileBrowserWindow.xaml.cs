@@ -122,6 +122,7 @@ namespace PS150.UI.Windows
         private FormField _fMidiBank = null!;   // krok28: banka pro přehrávání .mid (netbicí kanály) - nezávislá na živém hraní
         private FormField _fDrumBank = null!;   // krok30: banka jen pro kanál D10 (bicí) u .mid - nezávislá na _fMidiBank i na živém hraní
         private FormField _fMelodicRegister = null!;   // krok31: univerzální tónový rejstřík (1-128), 0 = skutečné nástroje ze souboru
+        private FormField _fDrumRegister = null!;   // krok37: totéž, ale bicí sada (kit) na kanálu D10, 0 = skutečná sada ze souboru
 
         // krok16: rejstřík = banka + číslo + zap/vyp, stejná pole jako všechno ostatní (Tab, kolečko, +/-, číslice, Enter).
         // Pole jsou přidána AŽ ZA ostatní, aby pořadí Tab odpovídalo pořadí na obrazovce.
@@ -219,6 +220,9 @@ namespace PS150.UI.Windows
             // znamená "žádný" a 1-128 se případně samo nahradí výchozím
             // rejstříkem, když v souboru SF2 zrovna není (viz Sf2MidiSynth.Create).
             _midiPlayer.SetMidiMelodicRegister(_settings.MidiMelodicRegister);
+
+            // krok37: totéž, ale pro bicí sadu (kit) na kanálu D10 - viz pole DrmR.
+            _midiPlayer.SetMidiDrumRegister(_settings.MidiDrumRegister);
 
             // krok36: cesta k .op2/GENMIDI bance pro SoundBlaster (banku 8) je
             // teď natvrdo odvozená v GmPianoMidiPlayer (OP2\GENMIDI.op2 vedle
@@ -965,6 +969,26 @@ namespace PS150.UI.Windows
             pMidiBank.Stepper = (cur, dir) => StepInList(GmPianoMidiPlayer.AvailablePlaybackBanks, cur, dir);
             _fMidiBank = _form.Add(pMidiBank);
 
+            // krok31: univerzální tónový rejstřík pro netbicí kanály .mid souboru -
+            // "lidské" GM číslování 1-128 (1 = Acoustic Grand Piano, staré
+            // natvrdo zapsané chování). 0 = žádný univerzální rejstřík - hrají
+            // skutečné nástroje podle Program Change v souboru (viz Sf2MidiSynth).
+            // krok37: pole UniR teď navazuje hned na MidB (banka + její rejstřík
+            // pohromadě), DrmB/DrmR mají stejnou dvojici hned za sebou níž.
+            var pMelodicRegister = Parameter.Number(
+                "UniR", "", 0, 128, 0, new[] { 1.0, 1.0, 10.0 },
+                () => _settings.MidiMelodicRegister,
+                v =>
+                {
+                    int program = (int)Math.Round(v);
+                    _midiPlayer.SetMidiMelodicRegister(program);
+                    _settings.MidiMelodicRegister = program;
+                    ScheduleSettingsSave();
+                },
+                zeroPad: 3,
+                defaultValue: 1.0);   // '*' vrátí na výchozí Acoustic Grand Piano
+            _fMelodicRegister = _form.Add(pMelodicRegister);
+
             // krok30: totéž, ale jen pro kanál D10 (bicí) - viz DualEngineMidiOut.
             // Stejný princip jako MidB, úplně nezávislé pole/nastavení.
             var pDrumBank = Parameter.Number(
@@ -981,23 +1005,27 @@ namespace PS150.UI.Windows
             pDrumBank.Stepper = (cur, dir) => StepInList(GmPianoMidiPlayer.AvailableDrumBanks, cur, dir);
             _fDrumBank = _form.Add(pDrumBank);
 
-            // krok31: univerzální tónový rejstřík pro netbicí kanály .mid souboru -
-            // "lidské" GM číslování 1-128 (1 = Acoustic Grand Piano, staré
-            // natvrdo zapsané chování). 0 = žádný univerzální rejstřík - hrají
-            // skutečné nástroje podle Program Change v souboru (viz Sf2MidiSynth).
-            var pMelodicRegister = Parameter.Number(
-                "UniR", "", 0, 128, 0, new[] { 1.0, 1.0, 10.0 },
-                () => _settings.MidiMelodicRegister,
+            // krok37: bicí rejstřík (kit) pro kanál D10 u .mid souboru - stejná
+            // logika jako UniR výš, jen pro bicí sadu (viz Sf2MidiSynth.
+            // SetDrumProgram/ISupportsDrumRegister). "Lidské" GM/GS číslování
+            // 1-128 (1 = Standard kit, staré natvrdo zapsané chování P000). 0 =
+            // žádný vynucený rejstřík - hraje skutečná sada podle Program
+            // Change na kanálu D10 v souboru. U OPL (SoundBlaster) banky se
+            // tohle pole neprojeví - formát .op2 má jen jednu univerzální bicí
+            // mapu, žádné přepínání sad v něm není (viz OplMidiSynth).
+            var pDrumRegister = Parameter.Number(
+                "DrmR", "", 0, 128, 0, new[] { 1.0, 1.0, 10.0 },
+                () => _settings.MidiDrumRegister,
                 v =>
                 {
                     int program = (int)Math.Round(v);
-                    _midiPlayer.SetMidiMelodicRegister(program);
-                    _settings.MidiMelodicRegister = program;
+                    _midiPlayer.SetMidiDrumRegister(program);
+                    _settings.MidiDrumRegister = program;
                     ScheduleSettingsSave();
                 },
                 zeroPad: 3,
-                defaultValue: 1.0);   // '*' vrátí na výchozí Acoustic Grand Piano
-            _fMelodicRegister = _form.Add(pMelodicRegister);
+                defaultValue: 1.0);   // '*' vrátí na výchozí Standard kit
+            _fDrumRegister = _form.Add(pDrumRegister);
 
             // ---- krok16: banka, rejstřík, zap/vyp ----
             var banks = TE.Banks;
@@ -1308,7 +1336,9 @@ namespace PS150.UI.Windows
 
             // krok29: pole "Lad" zrušeno - T a A4 se zobrazují vždy, odchylka
             // v centech jen když není neutrální (T=0 a A4=440).
-            WriteField(_fTranspose, "T ", "st  ");
+            // krok38: na přání zkráceno "T " -> "T" a "st  " -> "  " (ušetří
+            // místo na řádku stavového řádku, kam se teď vejde i DrmR).
+            WriteField(_fTranspose, "T", "  ");
             WriteField(_fA4, "A4 ", "Hz  ");
 
             if (!_tuning.IsNeutral)
@@ -1321,8 +1351,9 @@ namespace PS150.UI.Windows
             if (_isMidiMode)
             {
                 WriteField(_fMidiBank, "MidB ", "  ");   // krok28: banka/engine pro .mid (netbicí kanály) - nezávislá na živém hraní
-                WriteField(_fDrumBank, "DrmB ", "  ");   // krok30: totéž, jen pro kanál D10 (bicí)
                 WriteField(_fMelodicRegister, "UniR ", "  ");   // krok31: univerzální tónový rejstřík (0 = skutečné nástroje ze souboru)
+                WriteField(_fDrumBank, "DrmB ", "  ");   // krok30: totéž, jen pro kanál D10 (bicí)
+                WriteField(_fDrumRegister, "DrmR ", "  ");   // krok37: bicí sada/kit (0 = skutečná sada ze souboru)
             }
 
             if (_isMidiMode && _midiPlayer.AjiEnabled)
