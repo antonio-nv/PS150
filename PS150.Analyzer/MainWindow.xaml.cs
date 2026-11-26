@@ -34,8 +34,127 @@ namespace PS150.Analyzer
             InitializeComponent();
             LoadMicrophones();
             InitFftOptions();
+            InitNoteSelectors();
             SetupPlot();
             StartAudioCapture();
+        }
+
+        // krok24: C, C#, D... anglická konvence - žádné české Cis/Es/H/B, ať
+        // nevzniká zbytečná diskuse, které písmeno znamená co.
+        private static readonly string[] NoteNames =
+            { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+
+        private void InitNoteSelectors()
+        {
+            ComboNoteName.ItemsSource = NoteNames;
+            ComboNoteName.SelectedItem = "A";
+
+            var octaves = System.Linq.Enumerable.Range(-1, 11) // -1 .. 9
+                .Select(o => o.ToString(CultureInfo.InvariantCulture)).ToList();
+            ComboOctave.ItemsSource = octaves;
+            ComboOctave.SelectedItem = "2"; // výchozí A2, jako v dosavadních příkladech
+
+            // krok25: počet předem plánovaných tónů sekvence - 1 = bez aproximace
+            // (jako doteď), 2+ = má smysl krok (půltóny) mezi nimi, viz
+            // ComboStepCount_SelectionChanged níž.
+            ComboStepCount.ItemsSource = System.Linq.Enumerable.Range(1, 8)
+                .Select(n => n.ToString(CultureInfo.InvariantCulture)).ToList();
+            ComboStepCount.SelectedItem = "1";
+
+            UpdateHelmholtzLabel(); // pro jistotu, i kdyby SelectionChanged výš nestihl proběhnout
+        }
+
+        private void NoteCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateHelmholtzLabel();
+
+        private int GetStepCount()
+        {
+            if (ComboStepCount?.SelectedItem is string s && int.TryParse(s, out int n) && n >= 1) return n;
+            return 1;
+        }
+
+        // krok25: "Krok (půltóny)" dává smysl jen u sekvence 2 a víc tónů -
+        // s jedním tónem se žádná aproximace nepoužije, je to prostý jednorázový
+        // rozbor jako doteď.
+        private void ComboStepCount_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (LblNoteStep == null || TxtNoteStep == null) return; // při startu, než se XAML dotáhne
+
+            var visibility = GetStepCount() >= 2 ? Visibility.Visible : Visibility.Collapsed;
+            LblNoteStep.Visibility = visibility;
+            TxtNoteStep.Visibility = visibility;
+        }
+
+        // krok25: tradiční varhanářské/hudební označení oktávy (subkontra, kontra,
+        // velká, malá, jednočárkovaná...) vedle GM čísla - to je ten tvar, kterým
+        // se domlouváš s varhaníkem, ne "C#4". Apostrofy místo horních indexů
+        // (c', c''...) - běžný a bezpečný zápis, když nejsou k dispozici notové znaky.
+        private static readonly string[] CzechNoteNames =
+            { "C", "Cis", "D", "Dis", "E", "F", "Fis", "G", "Gis", "A", "B", "H" };
+
+        private static readonly string[] LowOctaveNames =
+            { "velká", "kontra", "subkontra", "sub-subkontra" };
+
+        private static readonly string[] HighOctaveNames =
+            { "malá", "jednočárkovaná", "dvojčárkovaná", "tříčárkovaná", "čtyřčárkovaná", "pětičárkovaná", "šestičárkovaná" };
+
+        private static string FormatHelmholtz(int midiNote)
+        {
+            int pitchClass = midiNote % 12;
+            int scientificOctave = midiNote / 12 - 1; // stejné číslování jako ComboOctave (c1 = C4 = MIDI 60)
+            string baseName = CzechNoteNames[pitchClass];
+
+            if (scientificOctave <= 2)
+            {
+                int commas = Math.Clamp(2 - scientificOctave, 0, LowOctaveNames.Length - 1);
+                string mark = new string(',', commas);
+                return $"{baseName}{mark} ({LowOctaveNames[commas]})";
+            }
+            else
+            {
+                int ticks = Math.Clamp(scientificOctave - 3, 0, HighOctaveNames.Length - 1);
+                string lower = char.ToLowerInvariant(baseName[0]) + baseName.Substring(1);
+                string mark = ticks == 0 ? "" : new string('\'', ticks);
+                return $"{lower}{mark} ({HighOctaveNames[ticks]})";
+            }
+        }
+
+        private void UpdateHelmholtzLabel()
+        {
+            if (TxtHelmholtz == null) return; // při startu, než se XAML dotáhne
+            TxtHelmholtz.Text = "= " + FormatHelmholtz(GetSelectedMidiNote());
+        }
+
+        // krok24: MIDI číslo z vybrané noty/oktávy (C4 = střední C = 60, stejně jako v Core).
+        private int GetSelectedMidiNote()
+        {
+            int pitchClass = Math.Max(0, ComboNoteName.SelectedIndex);
+            int octave = int.Parse((string)(ComboOctave.SelectedItem ?? "2"), CultureInfo.InvariantCulture);
+            return (octave + 1) * 12 + pitchClass;
+        }
+
+        private void SetSelectedMidiNote(int midiNote)
+        {
+            midiNote = Math.Clamp(midiNote, 0, 119); // horní mez B9 - víc, než kam ladička varhan sahá
+            ComboNoteName.SelectedIndex = midiNote % 12;
+            ComboOctave.SelectedItem = (midiNote / 12 - 1).ToString(CultureInfo.InvariantCulture);
+        }
+
+        // krok24: "pokračovat sekvencí" - šipky posunou vybranou notu o Krok
+        // půltónů (výchozí 4 = tvoje A/Cis/F), ať se tabulkou not nemusí
+        // listovat ručně po jedné.
+        private void BtnNextNote_Click(object sender, RoutedEventArgs e) => StepNote(+1);
+        private void BtnPrevNote_Click(object sender, RoutedEventArgs e) => StepNote(-1);
+
+        private void StepNote(int direction)
+        {
+            // krok25: u jediného naplánovaného tónu (Kroků=1) nemá interval
+            // žádný smysl - šipky prostě jedou po půltónech. Teprve od dvou
+            // kroků se použije zadaný interval z (teď viditelného) pole.
+            int step = 1;
+            if (GetStepCount() >= 2 && int.TryParse(TxtNoteStep.Text, out int parsed) && parsed > 0)
+                step = parsed;
+
+            SetSelectedMidiNote(GetSelectedMidiNote() + direction * step);
         }
 
 
@@ -65,38 +184,83 @@ namespace PS150.Analyzer
             TxtMagicOutput.Text = resultText;
         }
 
-        // 🎹 KOUZLO 1: VARHANY (Detekce píků, subharmonických a násobků vůči nejsilnější čáře)
+        // 🎹 KOUZLO 1: VARHANY (krok23: dominanta podle zadané noty, roztřídění
+        // VŠECH píků na nejbližší celočíselný násobek s vyřazením ústřelů)
         private string AnalyzeOrganSubAndHarmonics(double[] freqs, double[] dbs)
         {
             var pikes = FindAllPikes(freqs, dbs, -75.0); // Hledáme píky nad -75 dB
             if (pikes.Count == 0) return "[VARHANY] Žádný výrazný tón nenalezen (nízký signál).";
 
-            // Nejsilnější pík = Dominanta
-            var mainPeak = pikes.OrderByDescending(p => p.Db).First();
+            // krok24: dominanta se hledá JEN v okolí vybrané noty z ComboNoteName/
+            // ComboOctave (±50 centů - s rezervou pokryje jiný komorní tón i
+            // temperaturu i rozladění konkrétní píšťaly).
+            int expectedNote = GetSelectedMidiNote();
+            double expectedFreq = MidiNoteToFrequency(expectedNote);
+            double lo = expectedFreq * Math.Pow(2.0, -50.0 / 1200.0);
+            double hi = expectedFreq * Math.Pow(2.0, 50.0 / 1200.0);
+            var inWindow = pikes.Where(p => p.Freq >= lo && p.Freq <= hi).ToList();
+
+            if (inWindow.Count == 0)
+                return string.Format(CultureInfo.InvariantCulture,
+                    "[VARHANY] V okolí noty {0}{1} ({2:F1} Hz ±50 centů) nebyl nalezen žádný pík.",
+                    NoteNames[expectedNote % 12], expectedNote / 12 - 1, expectedFreq);
+
+            var mainPeak = inWindow.OrderByDescending(p => p.Db).First();
             double fMax = mainPeak.Freq;
 
-            // Seřazeno vzestupně podle násobku (základní tón první, pak nahoru) -
-            // takhle se to nejpřirozeněji čte i rovnou opisuje do presetu.
-            var sortedPikes = pikes.OrderByDescending(p => p.Db).Take(12)
-                                    .OrderBy(p => p.Freq / fMax)
-                                    .ToList();
+            // krok23: KAŽDÝ nalezený pík roztřídíme podle nejbližšího celého násobku
+            // fMax. Co se do tolerance (v centech) nevejde, je ústřel (brum, vítr,
+            // odraz v místnosti) a zahodí se. Frekvence alikvoty se bere PŘESNĚ
+            // jako n * fMax (čistě harmonický model), ne naměřená syrová hodnota -
+            // ta drobná odchylka je skoro jistě jen šum/rozladění, ne záměr.
+            const double toleranceCents = 45.0;
+            const int maxHarmonic = 24;
 
-            var ratios = sortedPikes.Select(p => p.Freq / fMax).ToList();
-            var relDbs = sortedPikes.Select(p => p.Db - mainPeak.Db).ToList();
-            // dB -> lineární amplituda (0 dB = 1.0), jak to čeká PartialAmplitudes.
+            var classified = new List<(int N, double Db)>();
+            int rejected = 0;
+            foreach (var p in pikes)
+            {
+                double ratio = p.Freq / fMax;
+                int n = (int)Math.Round(ratio);
+                if (n < 1 || n > maxHarmonic) { rejected++; continue; }
+
+                double deviationCents = 1200.0 * Math.Log2(ratio / n);
+                if (Math.Abs(deviationCents) > toleranceCents) { rejected++; continue; }
+
+                classified.Add((n, p.Db));
+            }
+
+            if (classified.Count == 0)
+                return "[VARHANY] Žádná alikvota se nepodařila spárovat s celočíselným násobkem dominanty.";
+
+            // Víc píků na stejné harmonické (postranní lalok okna apod.) -> necháme jen nejsilnější.
+            var best = classified
+                .GroupBy(h => h.N)
+                .Select(g => g.OrderByDescending(h => h.Db).First())
+                .OrderBy(h => h.N)
+                .ToList();
+
+            double mainDb = best.First(h => h.N == 1).Db; // 1. harmonická = fMax, vždy přítomná
+
+            var ratios = best.Select(h => (double)h.N).ToList();
+            var relDbs = best.Select(h => h.Db - mainDb).ToList();
             var amps = relDbs.Select(db => Math.Pow(10.0, db / 20.0)).ToList();
 
             string ratiosLine = "PartialRatios    = new[] { " +
-                string.Join(", ", ratios.Select(r => r.ToString("F4", CultureInfo.InvariantCulture))) + " },";
+                string.Join(", ", ratios.Select(r => r.ToString("F2", CultureInfo.InvariantCulture))) + " },";
             string ampsLine = "PartialAmplitudes = new[] { " +
                 string.Join(", ", amps.Select(a => a.ToString("F4", CultureInfo.InvariantCulture))) + " },";
             string dbLine = "// dB (info):        " +
                 string.Join(" | ", relDbs.Select(db => db.ToString("F1", CultureInfo.InvariantCulture)));
 
             return string.Format(CultureInfo.InvariantCulture,
-                "[VARHANY] DOMINANTA = {0:F1} Hz ({1:F1} dBFS)\n", fMax, mainPeak.Db) +
+                "[VARHANY] DOMINANTA = {0:F2} Hz ({1:F1} dBFS) | vyřazeno jako ústřel: {2}\n",
+                fMax, mainPeak.Db, rejected) +
                    ratiosLine + "\n" + ampsLine + "\n" + dbLine;
         }
+
+        // krok23: MIDI nota -> frekvence (A4 = 440 Hz = MIDI 69).
+        private static double MidiNoteToFrequency(int midiNote) => 440.0 * Math.Pow(2.0, (midiNote - 69) / 12.0);
 
         // 🔔 KOUZLO 2: ZVONY (Přesná spektrální analýza inharmonických piků)
         private string AnalyzeBellPikes(double[] freqs, double[] dbs)
@@ -189,7 +353,10 @@ namespace PS150.Analyzer
 
 
 
-        // Pomocná metoda pro nalezení všech lokálních píků (vrcholků) ve spektru
+        // Pomocná metoda pro nalezení všech lokálních píků (vrcholků) ve spektru.
+        // krok23: frekvence i dB už nejsou "na bin přesně", ale doladěné parabolickou
+        // interpolací přes 3 sousední body - u FFT 8192/44100 je to jinak jen ~5,4 Hz
+        // na bin, což je na poměry alikvot hrubé.
         private System.Collections.Generic.List<(double Freq, double Db)> FindAllPikes(double[] freqs, double[] dbs, double minDbThreshold)
         {
             var list = new System.Collections.Generic.List<(double Freq, double Db)>();
@@ -203,11 +370,29 @@ namespace PS150.Analyzer
                     dbs[i] > dbs[i - 1] && dbs[i] > dbs[i - 2] &&
                     dbs[i] > dbs[i + 1] && dbs[i] > dbs[i + 2])
                 {
-                    list.Add((freqs[i], dbs[i]));
+                    list.Add(ParabolicPeak(freqs, dbs, i));
                 }
             }
 
             return list;
+        }
+
+        // krok23: kvadratická (parabolická) interpolace vrcholu přes bin i a jeho
+        // dva sousedy - standardní trik na zpřesnění frekvence/amplitudy FFT píku
+        // bez nutnosti většího okna. Pracuje přímo na dB hodnotách.
+        private static (double Freq, double Db) ParabolicPeak(double[] freqs, double[] dbs, int i)
+        {
+            double y0 = dbs[i - 1], y1 = dbs[i], y2 = dbs[i + 1];
+            double denom = y0 - 2.0 * y1 + y2;
+
+            double p = Math.Abs(denom) > 1e-9 ? 0.5 * (y0 - y2) / denom : 0.0;
+            p = Math.Clamp(p, -1.0, 1.0); // pojistka proti úletu u téměř plochého vrcholu
+
+            double binWidth = freqs[i] - freqs[i - 1]; // rovnoměrná mřížka FFT, stačí jeden rozdíl
+            double freq = freqs[i] + p * binWidth;
+            double db = y1 - 0.25 * (y0 - y2) * p;
+
+            return (freq, db);
         }
 
 
@@ -465,4 +650,4 @@ namespace PS150.Analyzer
 
 
     }
-}
+}

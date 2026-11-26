@@ -8,6 +8,7 @@ using Melanchall.DryWetMidi.Common;
 using Melanchall.DryWetMidi.Core;
 using Melanchall.DryWetMidi.Interaction;
 using Melanchall.DryWetMidi.Multimedia;
+using PS150.Core.Sampler;   // krok18: Sf2MidiSynth, IMidiOut
 
 namespace PS150.UI.Windows
 {
@@ -62,6 +63,39 @@ namespace PS150.UI.Windows
         // Kanál č. 10 podle GM standardu je index 9 (kanály se číslují od 0).
         private const int PercussionChannel = 9;
         private bool _drumsEnabled = true;
+
+        // krok28: čísla bank použitelných jako CELÝ engine pro přehrávání .mid
+        // souborů (musí v sobě mít klavír B000:P000 + bicí B128:P000, jinak
+        // Sf2MidiSynth.TryCreate vrátí null a použije se GS Wavetable záloha
+        // níž). Úmyslně oddělené od PS150.Core.Banks.BankTable (to je číselník
+        // rejstříků živých varhan, ne přehrávacích enginů) - až přibude další
+        // skutečně funkční engine (např. OPL/SoundBlaster), stačí ho sem přidat.
+        public static readonly int[] AvailablePlaybackBanks = { PS150.Core.Banks._003_MuseScore_General.Number };
+
+        // krok30: totéž, ale pro kanál D10 (bicí) ZVLÁŠŤ - viz DualEngineMidiOut.
+        // Dnes je v seznamu stejná banka jako u AvailablePlaybackBanks (jiný
+        // engine pro bicí zatím není), ale pole jsou od sebe úmyslně nezávislá -
+        // až přibude např. OPL/SoundBlaster, přidá se sem i tam samostatně podle
+        // toho, jestli se hodí na tóny, na bicí, nebo na obojí.
+        public static readonly int[] AvailableDrumBanks = { PS150.Core.Banks._003_MuseScore_General.Number };
+
+        private int _playbackBankNumber = PS150.Core.Banks._003_MuseScore_General.Number;
+        private int _drumBankNumber = PS150.Core.Banks._003_MuseScore_General.Number;
+
+        /// <summary>krok28: banka (engine) pro netbicí kanály .mid souborů - nezávislé na bankách živého hraní. Projeví se od příštího PlayAsync.</summary>
+        public void SetMidiPlaybackBank(int bankNumber) => _playbackBankNumber = bankNumber;
+
+        /// <summary>krok30: banka (engine) jen pro kanál D10 (bicí) .mid souborů - nezávislé na _playbackBankNumber i na bankách živého hraní. Projeví se od příštího PlayAsync.</summary>
+        public void SetMidiDrumBank(int bankNumber) => _drumBankNumber = bankNumber;
+
+        // krok31: univerzální tónový rejstřík - 1-128 = vynutí tenhle GM
+        // program na VŠECH netbicích kanálech (1 = Acoustic Grand Piano,
+        // odpovídá starému natvrdo zapsanému chování). 0 = žádný univerzální
+        // rejstřík - hrají skutečné nástroje podle Program Change v souboru.
+        private int _melodicRegister = 1;
+
+        /// <summary>krok31: viz komentář u _melodicRegister výš. Projeví se od příštího PlayAsync.</summary>
+        public void SetMidiMelodicRegister(int gmProgram) => _melodicRegister = gmProgram;
 
         /// <summary>True = rytmika (kanál D10) hraje normálně, false = je umlčená - viz TogglePercussion().</summary>
         public bool DrumsEnabled => _drumsEnabled;
@@ -385,7 +419,7 @@ namespace PS150.UI.Windows
             if (device != null) SendNoteOffRaw(device, active.PoolChannel, active.SentNote, velocity);
         }
 
-        private static void SendNoteOffRaw(OutputDevice device, int channel, int note, int velocity)
+        private static void SendNoteOffRaw(IMidiOut device, int channel, int note, int velocity)
         {
             device.SendEvent(new NoteOffEvent((SevenBitNumber)note, (SevenBitNumber)velocity)
             {
@@ -459,7 +493,22 @@ namespace PS150.UI.Windows
         // panorámy po resetu ze souboru (viz ReassertChannelState).
         private volatile int[] _usedChannelsForPan = Array.Empty<int>();
 
-        private OutputDevice? _outputDevice;
+        // krok18: výstup přehrávače .mid. Natvrdo vlastní sampler (klavír + bicí z banky MuseScore_General,
+        // viz Sf2MidiSynth); když banka ještě není načtená, zůstává záloha Microsoft GS Wavetable Synth.
+        private IMidiOut? _outputDevice;
+
+        /// <summary>krok20: popis aktuálního zdroje zvuku pro obrazovku (zůstává i po doznění skladby).</summary>
+        public string OutputDescription { get; private set; } = "MIDI";
+
+        /// <summary>krok18: obal Windows syntezátoru jako IMidiOut (záloha, dokud se banka nenačte).</summary>
+        private sealed class GsWavetableOut : IMidiOut
+        {
+            private readonly OutputDevice _device;
+            public GsWavetableOut(OutputDevice device) { _device = device; }
+            public string Description => "Microsoft GS Wavetable Synth (záloha)";
+            public void SendEvent(MidiEvent midiEvent) => _device.SendEvent(midiEvent);
+            public void Dispose() => _device.Dispose();
+        }
         private CancellationTokenSource? _cts;
         private Task? _playbackTask;
         private Playback? _playback;
@@ -541,12 +590,40 @@ namespace PS150.UI.Windows
 
             try
             {
-                _outputDevice = OutputDevice.GetByName(DeviceName);
+                // krok30: dva nezávislé enginy - jeden pro kanál D10 (bicí, viz
+                // SetMidiDrumBank), jeden pro všechny ostatní kanály (viz
+                // SetMidiPlaybackBank) - spojené přes DualEngineMidiOut, který
+                // eventy rozesílá podle kanálu. Když se obě banky shodují (dnes
+                // vždycky, viz AvailablePlaybackBanks/AvailableDrumBanks), chová
+                // se to navenek stejně jako dřív jeden sdílený engine.
+                // krok31: univerzální rejstřík se týká jen netbicích kanálů -
+                // drumEngine pořád jen bicí (D10), tam na tom nezáleží.
+                var tonalEngine = Sf2MidiSynth.TryCreate(_playbackBankNumber, _melodicRegister);
+                var drumEngine = Sf2MidiSynth.TryCreate(_drumBankNumber);
+
+                if (tonalEngine != null && drumEngine != null)
+                {
+                    _outputDevice = new DualEngineMidiOut(tonalEngine, drumEngine);
+                }
+                else
+                {
+                    tonalEngine?.Dispose();
+                    drumEngine?.Dispose();
+                    _outputDevice = null;
+                }
+
+                // ... a když ani jedna banka ještě není načtená, záloha: Windows syntezátor jako dřív.
                 if (_outputDevice == null)
                 {
-                    throw new InvalidOperationException(
-                        $"Výstupní zařízení '{DeviceName}' nebylo na tomto PC nalezeno.");
+                    var gs = OutputDevice.GetByName(DeviceName);
+                    if (gs == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Výstupní zařízení '{DeviceName}' nebylo na tomto PC nalezeno.");
+                    }
+                    _outputDevice = new GsWavetableOut(gs);
                 }
+                OutputDescription = _outputDevice.Description;
 
                 // NOVÉ: tolerantní čtení - některé (hlavně herní) .mid soubory mají
                 // v řídicí události hodnotu mimo rozsah 0-127 (např. 128). DryWetMidi
@@ -1085,7 +1162,7 @@ namespace PS150.UI.Windows
             SendTunedNoteOffCore(device, channel, noteOff.NoteNumber, noteOff.Velocity);
         }
 
-        private void SendTunedNoteOffCore(OutputDevice device, int channel, int note, SevenBitNumber velocity)
+        private void SendTunedNoteOffCore(IMidiOut device, int channel, int note, SevenBitNumber velocity)
         {
             // Nota, kterou jsme nikdy nerozezněli (např. byla mimo rozsah),
             // se ani nevypíná.

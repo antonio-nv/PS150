@@ -4,6 +4,13 @@ using System.Text.Json;
 
 namespace PS150.Core
 {
+    /// <summary>krok17: jedna banka SF2 - číslo banky (viz PS150.Core.Banks) a cesta k souboru.</summary>
+    public class Sf2BankSetting
+    {
+        public int Bank { get; set; }
+        public string Path { get; set; } = "";
+    }
+
     public class AppSettings
     {
         public int Volume { get; set; } = 80;
@@ -11,16 +18,40 @@ namespace PS150.Core
 
         // NOVÉ: ladění / transpozice (klávesa t, viz PlayerTuning). Ve
         // starém settings.json tyhle položky chybí - použijí se výchozí
-        // hodnoty níž (ladění vypnuté, A4 = 440 Hz, bez transpozice).
-        public bool TuningActive { get; set; } = false;
+        // hodnoty níž (bez transpozice, A4 = 440 Hz).
+        // krok29: zrušeno samostatné TuningActive - "vypnuto" teď prostě
+        // znamená T=0 a A4=440 (viz PlayerTuning.IsNeutral). Starý
+        // settings.json s klíčem "TuningActive" se dál normálně načte,
+        // ten klíč se jen tiše ignoruje.
         public double TuningTransposeSemitones { get; set; } = 0.0;
         public double TuningReferenceA4Hz { get; set; } = 440.0;
 
         // NOVÉ: AJI (adaptivní čisté ladění .mid souborů, klávesa a) zapnuto/vypnuto.
         public bool AjiEnabled { get; set; } = false;
 
+        // krok28: banka (engine), kterou GmPianoMidiPlayer použije pro přehrávání
+        // NEBICÍCH kanálů .mid souborů v prohlížeči - ÚMYSLNĚ nezávislé na
+        // bankách živého hraní (TE.Banks/App.OrganEngine). Viz
+        // GmPianoMidiPlayer.AvailablePlaybackBanks.
+        public int MidiPlaybackBank { get; set; } = PS150.Core.Banks._003_MuseScore_General.Number;
+
+        // krok30: totéž, ale jen pro kanál D10 (bicí) - nezávislé na
+        // MidiPlaybackBank i na bankách živého hraní. Viz
+        // GmPianoMidiPlayer.AvailableDrumBanks / DualEngineMidiOut.
+        public int MidiDrumBank { get; set; } = PS150.Core.Banks._003_MuseScore_General.Number;
+
+        // krok31: univerzální tónový rejstřík pro .mid soubory - "lidské" GM
+        // číslování 1-128 (1 = Acoustic Grand Piano = staré natvrdo zapsané
+        // chování). 0 = žádný univerzální rejstřík - hrají skutečné nástroje
+        // podle Program Change v souboru. Viz GmPianoMidiPlayer.SetMidiMelodicRegister.
+        public int MidiMelodicRegister { get; set; } = 1;
+
         // NOVÉ: okno přehrávače otočené o 90 stupňů (klávesa r).
         public bool Rotated90 { get; set; } = false;
+
+        // krok17: banky SF2 (mimo repozitář) a jejich čísla. Příklad ve settings.json:
+        //   "Sf2Banks": [ { "Bank": 3, "Path": "C:\\banky\\MuseScore_General.sf2" } ]
+        public System.Collections.Generic.List<Sf2BankSetting> Sf2Banks { get; set; } = new System.Collections.Generic.List<Sf2BankSetting>();
 
         public string? LastFolderPath { get; set; }
         public string? LastFilePath { get; set; }
@@ -72,4 +103,4 @@ namespace PS150.Core
         }
 
     }
-}
+}

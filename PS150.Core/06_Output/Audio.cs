@@ -104,9 +104,12 @@ namespace PS150.Core.Output
         /// <summary>Přepne rejstřík ON/OFF podle čísla. Vrací nový stav (true = ON).</summary>
         public bool ToggleRegister(int number) => _synth.ToggleRegister(number);
 
-        public bool IsRegisterActive(int number) => _synth.IsRegisterActive(number);
+        /// <summary>krok15: přepnutí rejstříku podle (banka, číslo).</summary>
+        public bool ToggleRegister(PS150.Core.Input.RegisterId id) => _synth.ToggleRegister(id);
 
-        public IReadOnlyCollection<int> ActiveRegisters => _synth.ActiveRegisters;
+        public bool IsRegisterActive(PS150.Core.Input.RegisterId id) => _synth.IsRegisterActive(id);
+
+        public IReadOnlyCollection<PS150.Core.Input.RegisterId> ActiveRegisters => _synth.ActiveRegisters;
 
         public void Dispose()
         {

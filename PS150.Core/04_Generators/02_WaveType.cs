@@ -18,7 +18,8 @@
         Cembalo,
         Bell,
         AdditiveString, // Provizorní aditivní (alikvotová) struna - viz AdditiveStringVoice.cs
-        Drums           // Bicí GM (35-81) - viz DrumVoice.cs a DrumParameter níž
+        Drums,          // Bicí GM (35-81) - viz DrumVoice.cs a DrumParameter níž
+        Sample          // krok17: vzorky ze SF2 - viz SampleVoice.cs
     }
 
     // Kterou ze dvou metod má DrumVoice použít pro daný bicí zvuk (viz DrumParameter).
@@ -61,6 +62,13 @@
         // 0 = zatím nepřiřazeno.
         public int Number { get; set; } = 0;
 
+        // krok17b: preset o bance nic neví. Dvojici (banka, číslo) tvoří klíč v registru ToneEngine:
+        // syntetické presety jdou do banky 001, samplované banky se zapisují pod svým číslem (RegisterSf2Bank).
+
+        // krok17: preset ze SF2 banky (jen u InstrumentType.Sample) a zda ho ovládá sustain pedál (klavíry).
+        public PS150.Core.Sampler.Sf2Preset? Sf2Preset { get; set; }
+        public bool SustainPedal { get; set; } = false;
+
         // Který nástroj/engine preset používá.
         public InstrumentType Instrument { get; set; } = InstrumentType.Organ;
 
@@ -89,6 +97,16 @@
         public double[] PartialRatios { get; set; } = null;
         public double[] PartialAmplitudes { get; set; } = null;
         public double[] PartialDecayRates { get; set; } = null;
+
+        // krok23: NEPOVINNÁ obálka síly alikvot NAPŘÍČ KLAVIATUROU (OrganVoice).
+        // Místo jedné pevné PartialAmplitudes pro celý rejstřík jde zadat pár
+        // "uzlů" (typicky nejhlubší/prostřední/nejvyšší hraná nota) - mezi nimi
+        // OrganVoice lineárně interpoluje KAŽDOU alikvotu zvlášť podle čísla
+        // hrané MIDI noty. PartialRatios zůstává jedno společné pole (poměry
+        // jsou celočíselné násobky bez ohledu na notu); mění se jen jejich síla.
+        // Necháš-li null, OrganVoice použije jako dřív jednotné PartialAmplitudes
+        // pro celý rejstřík (zpětná kompatibilita, nic se nerozbije).
+        public PartialBreakpoint[] AmplitudeEnvelope { get; set; } = null;
 
         // Parametry Šumu / Chiffu / Úderu (Organ)
         public double ChiffNoiseGain { get; set; } = 0.2;
@@ -164,5 +182,11 @@
         AM, // Amplitudová modulace (Tremolo)
         FM  // Frekvenční modulace (Vibrato)
     }
+
+    // krok23: jeden uzel ve VoicePreset.AmplitudeEnvelope - viz komentář tam.
+    // Note = MIDI číslo noty (stejné číslování jako všude v projektu, 60 =
+    // střední C), Amplitudes = síla jednotlivých alikvot v tomhle uzlu, musí
+    // mít stejnou délku jako VoicePreset.PartialRatios.
+    public readonly record struct PartialBreakpoint(int Note, double[] Amplitudes);
 
 }

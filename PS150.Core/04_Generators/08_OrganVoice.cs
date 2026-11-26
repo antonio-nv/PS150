@@ -30,7 +30,7 @@ namespace PS150.Core.Generators
         private readonly double _gainA;
         private readonly double _gainB;
 
-        public OrganVoice(VoicePreset preset, double sampleRate) : base(sampleRate)
+        public OrganVoice(VoicePreset preset, int noteNumber, double sampleRate) : base(sampleRate)
         {
             _preset = preset;
 
@@ -44,6 +44,20 @@ namespace PS150.Core.Generators
 
             _partialRatios = hasPartials ? preset.PartialRatios : new double[] { 1.0 };
             _partialAmplitudes = hasPartials ? preset.PartialAmplitudes : new double[] { 1.0 };
+
+            // krok23: pokud rejstřík nese AmplitudeEnvelope (uzly síly alikvot
+            // napříč klaviaturou), ten MÁ PŘEDNOST před jednotným
+            // PartialAmplitudes - síla každé alikvoty se dopočítá lineární
+            // interpolací mezi dvěma nejbližšími uzly podle hrané noty.
+            if (hasPartials)
+            {
+                var interpolated = InterpolateAmplitudeEnvelope(preset.AmplitudeEnvelope, noteNumber, _partialRatios.Length);
+                if (interpolated != null)
+                {
+                    _partialAmplitudes = interpolated;
+                }
+            }
+
             _phasesA = new double[_partialRatios.Length];
             _phasesB = new double[_partialRatios.Length];
 
@@ -84,6 +98,45 @@ namespace PS150.Core.Generators
             NoteEnvelope.ReleaseTime = 0.03f;  // Rychlé vypnutí po uvolnění
 
             _chiffFilter.SetParams(_preset.ChiffFilterFreqHz, _preset.ChiffFilterQ, sampleRate);
+        }
+
+        // krok23: lineární interpolace síly alikvot mezi dvěma nejbližšími uzly
+        // AmplitudeEnvelope podle čísla hrané noty. Vrací null, když envelope
+        // chybí nebo nesedí délkou - pak se beze změny použije dosavadní
+        // jednotné PartialAmplitudes (viz volání v konstruktoru výš).
+        private static double[] InterpolateAmplitudeEnvelope(PartialBreakpoint[] envelope, int noteNumber, int partialCount)
+        {
+            if (envelope == null || envelope.Length == 0) return null;
+
+            foreach (var node in envelope)
+            {
+                if (node.Amplitudes == null || node.Amplitudes.Length != partialCount) return null;
+            }
+
+            // Uzly musí být setříděné podle noty - radši si je setřídit tady,
+            // než spoléhat, že je tak někdo zapsal v presetu.
+            var sorted = (PartialBreakpoint[])envelope.Clone();
+            Array.Sort(sorted, (a, b) => a.Note.CompareTo(b.Note));
+
+            if (noteNumber <= sorted[0].Note) return (double[])sorted[0].Amplitudes.Clone();
+            if (noteNumber >= sorted[^1].Note) return (double[])sorted[^1].Amplitudes.Clone();
+
+            for (int i = 0; i < sorted.Length - 1; i++)
+            {
+                var lo = sorted[i];
+                var hi = sorted[i + 1];
+                if (noteNumber < lo.Note || noteNumber > hi.Note) continue;
+
+                double t = hi.Note == lo.Note ? 0.0 : (noteNumber - lo.Note) / (double)(hi.Note - lo.Note);
+                var result = new double[partialCount];
+                for (int p = 0; p < partialCount; p++)
+                {
+                    result[p] = lo.Amplitudes[p] + t * (hi.Amplitudes[p] - lo.Amplitudes[p]);
+                }
+                return result;
+            }
+
+            return (double[])sorted[^1].Amplitudes.Clone(); // nemělo by nastat, jen pro jistotu
         }
 
         public override void NoteOn()

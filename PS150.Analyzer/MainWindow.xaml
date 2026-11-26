@@ -25,6 +25,22 @@
             <TextBlock Text="Okno FFT:" Foreground="White" VerticalAlignment="Center" Margin="0,0,5,0" FontWeight="Bold"/>
             <ComboBox x:Name="ComboFftSize" Width="190" Margin="0,0,10,0" SelectionChanged="ComboFftSize_SelectionChanged"/>
 
+            <TextBlock Text="Nota:" Foreground="White" VerticalAlignment="Center" Margin="0,0,5,0" FontWeight="Bold"/>
+            <ComboBox x:Name="ComboNoteName" Width="55" Margin="0,0,2,0" SelectionChanged="NoteCombo_SelectionChanged"
+                      ToolTip="Anglická konvence (C, C#, D... A, A#, B) - žádné české Cis/Es/H/B."/>
+            <ComboBox x:Name="ComboOctave" Width="48" Margin="0,0,5,0" SelectionChanged="NoteCombo_SelectionChanged"/>
+            <TextBlock x:Name="TxtHelmholtz" Text="" Foreground="#00FF66" FontFamily="Consolas" FontSize="13"
+                       VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Tradiční varhanářské/hudební označení - pro domluvu s varhaníkem."/>
+
+            <TextBlock Text="Kroků:" Foreground="White" VerticalAlignment="Center" Margin="0,0,5,0" FontWeight="Bold"/>
+            <ComboBox x:Name="ComboStepCount" Width="45" Margin="0,0,10,0" SelectionChanged="ComboStepCount_SelectionChanged"
+                      ToolTip="Počet předem plánovaných tónů v sekvenci. 1 = jen tenhle tón, žádná aproximace (jako doteď). 2+ = sekvence s krokem níže, má smysl pro aproximaci alikvot napříč rejstříkem."/>
+
+            <TextBlock x:Name="LblNoteStep" Text="Krok (půltóny):" Foreground="White" VerticalAlignment="Center" Margin="0,0,5,0" FontWeight="Bold" Visibility="Collapsed"/>
+            <TextBox x:Name="TxtNoteStep" Width="30" Margin="0,0,5,0" Text="4" TextAlignment="Center" Visibility="Collapsed"/>
+            <Button x:Name="BtnPrevNote" Content="◀" Width="28" Padding="2" Click="BtnPrevNote_Click" Margin="0,0,2,0"/>
+            <Button x:Name="BtnNextNote" Content="▶" Width="28" Padding="2" Click="BtnNextNote_Click" Margin="0,0,10,0"/>
+
             <TextBlock Text="Kouzlo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,5,0" FontWeight="Bold"/>
             <ComboBox x:Name="ComboMagicMode" Width="190" Margin="0,0,10,0">
                 <ComboBoxItem Content="🎹 Varhany (Harmonické zlomky)"/>
@@ -58,4 +74,4 @@
             <TextBlock x:Name="TxtVuDb" Grid.Column="2" Text="-60.0 dB" Foreground="White" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="Bold"/>
         </Grid>
     </Grid>
-</Window>
+</Window>

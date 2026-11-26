@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 
 namespace PS150.Core.Parameters
@@ -43,6 +43,18 @@ namespace PS150.Core.Parameters
         public string OnText { get; }
         public string OffText { get; }
 
+        /// <summary>krok16: zobrazit celé číslo s vedoucími nulami (banka 001, rejstřík 085). 0 = bez nul.</summary>
+        public int ZeroPad { get; private set; }
+
+        /// <summary>
+        /// krok16: vlastní krok po existujících hodnotách (např. další existující rejstřík v bance).
+        /// Parametry: aktuální hodnota, směr (+1/-1); vrací novou hodnotu. Null = obyčejný krok.
+        /// </summary>
+        public Func<double, int, double>? Stepper { get; set; }
+
+        /// <summary>krok16: zavolá se po potvrzení ručně zadaného čísla klávesou Enter (ne při +/- ani kolečku).</summary>
+        public Action<double>? OnTypedCommit { get; set; }
+
         private readonly Func<double> _get;
         private readonly Action<double> _set;
 
@@ -69,12 +81,14 @@ namespace PS150.Core.Parameters
         /// <param name="steps">Tři kroky: jemný, normální, hrubý.</param>
         public static Parameter Number(
             string name, string unit, double min, double max, int decimals, double[] steps,
-            Func<double> get, Action<double> set, bool showSign = false, double? defaultValue = null)
+            Func<double> get, Action<double> set, bool showSign = false, double? defaultValue = null, int zeroPad = 0)
         {
             if (steps == null || steps.Length != 3)
                 throw new ArgumentException("Parametr potřebuje právě tři kroky (jemný, normální, hrubý).", nameof(steps));
 
-            return new Parameter(name, unit, ParameterKind.Number, min, max, decimals, steps, showSign, "", "", get, set, defaultValue);
+            var parameter = new Parameter(name, unit, ParameterKind.Number, min, max, decimals, steps, showSign, "", "", get, set, defaultValue);
+            parameter.ZeroPad = zeroPad;   // krok16
+            return parameter;
         }
 
         public static Parameter Toggle(
@@ -94,6 +108,10 @@ namespace PS150.Core.Parameters
         public string FormatValue(double value)
         {
             if (Kind == ParameterKind.Toggle) return value >= 0.5 ? OnText : OffText;
+
+            // krok16: celé číslo s vedoucími nulami
+            if (ZeroPad > 0 && Decimals == 0 && !ShowSign)
+                return ((long)Math.Round(value)).ToString("D" + ZeroPad, CultureInfo.InvariantCulture);
 
             string format = ShowSign
                 ? "+0." + new string('0', Decimals) + ";-0." + new string('0', Decimals) + ";+0." + new string('0', Decimals)
@@ -176,6 +194,16 @@ namespace PS150.Core.Parameters
             if (Kind == ParameterKind.Toggle)
             {
                 SetValue(IsOn ? 0.0 : 1.0);
+                return;
+            }
+
+            // krok16: krok po existujících hodnotách (hrubý krok = 10 položek najednou)
+            if (Stepper != null)
+            {
+                double v = Value;
+                int count = (stepIndex == 2 ? 10 : 1) * Math.Max(1, multiplier);
+                for (int i = 0; i < count; i++) v = Stepper(v, Math.Sign(direction));
+                SetValue(v);
                 return;
             }
 

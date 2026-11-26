@@ -84,10 +84,36 @@ namespace PS150.UI.Windows
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            // NOVÉ: diagnostika SoundFontu - PS150.exe --sf2info "banka.sf2" zapíše přehled
+            // vedle banky (banka.sf2.info.txt a banka.sf2.info_detail.txt) a skončí.
+            if (e.Args.Length >= 2 && string.Equals(e.Args[0], "--sf2info", StringComparison.OrdinalIgnoreCase))
+            {
+                string path = string.Join(" ", e.Args.Skip(1)).Trim('"');
+                string report = PS150.Core.Sampler.Sf2Info.Write(path);
+                System.Windows.MessageBox.Show("Hotovo: " + report, "PS150 SF2 info");
+                Shutdown();
+                return;
+            }
+
+            // krok20: diagnostika - PS150.exe --sf2render "banka.sf2" "vystup.wav" vykreslí zkušební tóny
+            // klavíru a bicích do WAV a vedle zapíše vystup.wav.txt (zóny, smyčky, rychlost vykreslování).
+            if (e.Args.Length >= 3 && string.Equals(e.Args[0], "--sf2render", StringComparison.OrdinalIgnoreCase))
+            {
+                // volitelný 4. parametr: cesta k .mid souboru, který se vykreslí místo zkušební scény
+                string report = PS150.Core.Sampler.Sf2Render.Run(e.Args[1].Trim('"'), e.Args[2].Trim('"'),
+                    e.Args.Length >= 4 ? e.Args[3].Trim('"') : null);
+                System.Windows.MessageBox.Show("Hotovo: " + report, "PS150 SF2 render");
+                Shutdown();
+                return;
+            }
+
             // --- KROK 0: UKONČENÍ PŘEDCHOZÍCH INSTANCÍ PROHLÍŽEČE ---
             KillPreviousInstances();
 
             base.OnStartup(e);
+
+            // krok21: sběr paměti se snaží nedělat dlouhé pauzy (velké banky SF2 v paměti, zvuk nesmí přerušovat)
+            System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
 
             // 1. INICIALIZACE NOVÉHO TONEENGINE (Rejstříky / Varhany)
             _toneEngine = new ToneEngine();
@@ -96,6 +122,21 @@ namespace PS150.UI.Windows
             _audioEngine.Start();
 
             OrganEngine = _audioEngine;
+
+            // krok17/19: banky SF2 se načítají na pozadí (program mezitím hraje syntetické zvuky).
+            // NATVRDO ze složky "sf2" vedle exe (nezávisle na settings.json): 003 MuseScore_General, 005 Bureå Church Ext.
+            // Další banky lze dál přidat v settings.json (Sf2Banks); čísla 3 a 5 se tam ignorují.
+            PS150.Core.Sampler.Sf2Loader.StartLoad(PS150.Core.Banks._003_MuseScore_General.Number, @"sf2\MuseScore_General.sf2");
+            PS150.Core.Sampler.Sf2Loader.StartLoad(PS150.Core.Banks._005_Burea_Church_Ext.Number, @"sf2\Burea_Church_Ext_2.02.sf2");
+
+            foreach (var bankSetting in AppSettings.Load().Sf2Banks)
+            {
+                if (bankSetting.Bank == PS150.Core.Banks._003_MuseScore_General.Number ||
+                    bankSetting.Bank == PS150.Core.Banks._005_Burea_Church_Ext.Number) continue;
+
+                if (!string.IsNullOrWhiteSpace(bankSetting.Path))
+                    PS150.Core.Sampler.Sf2Loader.StartLoad(bankSetting.Bank, bankSetting.Path);
+            }
 
             // 2. INICIALIZACE CORE INPUTU (Živé piano z USB / Casio)
             _inputManager = new InputManager();
@@ -196,4 +237,4 @@ namespace PS150.UI.Windows
             base.OnExit(e);
         }
     }
-}
+}

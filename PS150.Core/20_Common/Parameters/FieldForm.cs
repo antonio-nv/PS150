@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -130,6 +130,18 @@ namespace PS150.Core.Parameters
 
             text = field.Parameter.FormatValue();
             return "[" + text.PadLeft(inner) + "]";
+        }
+
+        /// <summary>
+        /// krok16: zaostří pole a rovnou do něj vloží první znak (číslici). Slouží k tomu, aby
+        /// "85 Enter" fungovalo i bez předchozího Tab/kliknutí - číslice rovnou jdou do pole Rejstřík.
+        /// </summary>
+        public bool FocusAndType(FormField field, char c)
+        {
+            if (!field.Visible) return false;
+            StopEditing();
+            Focused = field;
+            return HandleChar(c);
         }
 
         public void ClearFocus()
@@ -344,6 +356,7 @@ namespace PS150.Core.Parameters
             if (Focused.Parameter.TryParse(_buffer.ToString(), out double value, out string error))
             {
                 Focused.Parameter.SetValue(value);
+                Focused.Parameter.OnTypedCommit?.Invoke(Focused.Parameter.Value);   // krok16
                 StopEditing();
             }
             else

@@ -1,19 +1,23 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;   // krok17: registr se doplňuje i z vlákna načítání SF2
 using System.Linq;
 using PS150.Core.Generators;
 using PS150.Core.Tones;
 using PS150.Core.Input;
+using PS150.Core.Banks; // krok15: banky
+using PS150.Core.Sampler;   // krok17: SF2
 
 namespace PS150.Core.ToneEngine
 {
     public class ActiveNote
     {
         public int NoteNumber { get; set; }     // MIDI číslo noty (např. 60 = C4)
-        public int RegisterNumber { get; set; } // Které číslo rejstříku tenhle hlas hraje
+        public RegisterId Register { get; set; } // krok15: který rejstřík (banka + číslo) tenhle hlas hraje
         public double Frequency { get; set; }   // Kmitočet v Hz (např. 261.63 Hz)
         public SynthVoice Voice { get; set; }   // Instance hlasu (Organ/Piano/Cembalo/Bell)
         public InstrumentType Instrument { get; set; }   // NOVÉ: druh nástroje (bicí, klavír...) pro směrování a sustain
+        public bool UsesSustain { get; set; }            // krok17: ovládá ho sustain pedál (klavíry)
         public bool PendingRelease { get; set; }         // NOVÉ: klávesa puštěna při sešlápnutém pedálu - uvolní se až s pedálem
     }
 
@@ -30,7 +34,7 @@ namespace PS150.Core.ToneEngine
         // Čísla rejstříků, které jsou právě "zataženy" (ON). Nová NoteOn vytvoří
         // hlas pro každý aktivní rejstřík zvlášť - stejná nota tak může znít
         // současně z víc rejstříků najednou (přesně jako u skutečných varhan).
-        private readonly HashSet<int> _activeRegisters;
+        private readonly HashSet<RegisterId> _activeRegisters; // krok15: (banka, číslo) místo prostého čísla
 
         // Zámek chránící sdílený stav před konfliktem MIDI vlákna a Audio vlákna
         private readonly object _lock = new object();
@@ -47,8 +51,8 @@ namespace PS150.Core.ToneEngine
         /// <summary>NOVÉ: MIDI kanál bicích (kanál 10 = index 9).</summary>
         public const int DrumChannel = 9;
 
-        /// <summary>NOVÉ: číslo rejstříku bicí soupravy. Na kanálu 10 hraje VŽDY, ať je zapnutý nebo ne.</summary>
-        public const int DrumRegisterNumber = 700;
+        /// <summary>krok15: rejstřík bicí soupravy = banka 001 (Syntetické zvuky), číslo 700. Na kanálu 10 hraje VŽDY, ať je zapnutý nebo ne.</summary>
+        public static readonly RegisterId DrumRegister = new RegisterId(_001_SyntetickeZvuky.Number, 700);
 
         // NOVÉ: sustain pedál (CC64). Týká se jen klavírních hlasů (InstrumentType.Piano).
         private bool _sustainDown;
@@ -56,15 +60,16 @@ namespace PS150.Core.ToneEngine
         // --- REGISTR PRESETŮ (jediné místo, kam se musí ručně přidat nový rejstřík) ---
         // Až vytvoříš nový preset, přidej ho SEM do seznamu, jinak ho ToggleRegister
         // podle čísla nenajde.
-        private static readonly Dictionary<int, VoicePreset> _presetRegistry = BuildRegistry();
+        private static readonly ConcurrentDictionary<RegisterId, VoicePreset> _presetRegistry = new ConcurrentDictionary<RegisterId, VoicePreset>(BuildRegistry());
 
-        private static Dictionary<int, VoicePreset> BuildRegistry()
+        private static Dictionary<RegisterId, VoicePreset> BuildRegistry()
         {
             var presets = new VoicePreset[]
             {
                 _001_Bombard16.Preset,
                 _002_ViolnBas16.Preset,
                 _085_Aeolus.Preset,
+                _108_VoxCelesta.Preset,
                 _200_Piano_Petrof.Preset,
                 _201_Piano_Eletricke.Preset,
                 _202_Piano_LimonadovyJoe.Preset,
@@ -76,7 +81,7 @@ namespace PS150.Core.ToneEngine
                 _700_Drums.Preset,
             };
 
-            var dict = new Dictionary<int, VoicePreset>();
+            var dict = new Dictionary<RegisterId, VoicePreset>();
 
             foreach (var preset in presets)
             {
@@ -87,15 +92,18 @@ namespace PS150.Core.ToneEngine
                     continue;
                 }
 
-                if (dict.ContainsKey(preset.Number))
+                // krok17b: všechny presety tady jsou syntetické = banka 001; (banka, číslo) je klíč registru.
+                var id = new RegisterId(_001_SyntetickeZvuky.Number, preset.Number);
+
+                if (dict.ContainsKey(id))
                 {
                     System.Diagnostics.Debug.WriteLine(
-                        $"[ToneEngine] Kolize čísla rejstříku {preset.Number} mezi '{dict[preset.Number].Name}' " +
+                        $"[ToneEngine] Kolize rejstříku {id} mezi '{dict[id].Name}' " +
                         $"a '{preset.Name}' - použit první, druhý ignorován.");
                     continue;
                 }
 
-                dict[preset.Number] = preset;
+                dict[id] = preset;
             }
 
             return dict;
@@ -111,10 +119,11 @@ namespace PS150.Core.ToneEngine
 
             // Výchozí stav při startu aplikace - ať to hned po spuštění hraje
             // (jako doteď), ne že by bylo úplně potichu, dokud něco nezmáčkneš.
-            _activeRegisters = new HashSet<int>();
-            if (_presetRegistry.ContainsKey(1))
+            _activeRegisters = new HashSet<RegisterId>();
+            var startId = new RegisterId(_001_SyntetickeZvuky.Number, 1);
+            if (_presetRegistry.ContainsKey(startId))
             {
-                _activeRegisters.Add(1);
+                _activeRegisters.Add(startId);
             }
         }
 
@@ -127,7 +136,71 @@ namespace PS150.Core.ToneEngine
         /// je OFF nebo číslo vůbec neexistuje v registru presetů (neplatné číslo
         /// se prostě tiše ignoruje, nic nespadne).
         /// </summary>
+        /// <summary>
+        /// krok17: číslo rejstříku pro preset z SF2 = MSB*1000 + program (B000 P040 = 40, B008 P040 = 8040);
+        /// bicí kity (B128) mají 9000 + program. Čísla odpovídají výpisu v .info.txt banky.
+        /// </summary>
+        public static int Sf2RegisterNumber(int msb, int program) => msb == 128 ? 9000 + program : msb * 1000 + program;
+
+        /// <summary>krok17: zapíše presety načtené banky SF2 do registru. Vrací počet přidaných rejstříků.</summary>
+        public static int RegisterSf2Bank(int bankNumber, Sf2Bank bank)
+        {
+            int count = 0;
+            foreach (var p in bank.Presets)
+            {
+                int number = Sf2RegisterNumber(p.Bank, p.Program);
+                var preset = new VoicePreset
+                {
+                    Name = p.Name,
+                    Number = number,
+                    Instrument = InstrumentType.Sample,
+                    Sf2Preset = p,
+                    SustainPedal = p.Bank == 0 && p.Program < 8   // klavíry (GM 0-7) ovládá pedál
+                };
+                if (_presetRegistry.TryAdd(new RegisterId(bankNumber, number), preset)) count++;
+            }
+            return count;
+        }
+
+        // krok16: dotazy na registr pro formulář (banky, čísla rejstříků v bance, jméno rejstříku).
+
+        /// <summary>Čísla bank, které mají aspoň jeden rejstřík (vzestupně). Později se omezí nastavením povolených bank.</summary>
+        public static IReadOnlyList<int> Banks =>
+            _presetRegistry.Keys.Select(k => k.Bank).Distinct().OrderBy(b => b).ToList();
+
+        /// <summary>Čísla rejstříků v dané bance (vzestupně).</summary>
+        public static IReadOnlyList<int> NumbersInBank(int bank) =>
+            _presetRegistry.Keys.Where(k => k.Bank == bank).Select(k => k.Number).OrderBy(n => n).ToList();
+
+        /// <summary>Jméno rejstříku nebo null, když v registru není.</summary>
+        public static string? RegisterName(RegisterId id) =>
+            _presetRegistry.TryGetValue(id, out var preset) ? preset.Name : null;
+
+        public static bool RegisterExists(RegisterId id) => _presetRegistry.ContainsKey(id);
+
+        /// <summary>
+        /// krok15: zpětně kompatibilní zadání jen čísla (bez banky). Najde banku, ve které
+        /// číslo existuje (při shodě vyhraje nižší číslo banky). Do formuláře s bankami
+        /// (krok16) se tohle nahradí explicitní volbou banky.
+        /// </summary>
+        public bool TryResolveRegister(int number, out RegisterId id)
+        {
+            bool found = false;
+            id = default;
+            foreach (var key in _presetRegistry.Keys)
+            {
+                if (key.Number != number) continue;
+                if (!found || key.Bank < id.Bank) { id = key; found = true; }
+            }
+            return found;
+        }
+
         public bool ToggleRegister(int number)
+        {
+            return TryResolveRegister(number, out var id) && ToggleRegister(id);
+        }
+
+        public bool ToggleRegister(RegisterId number)
         {
             if (!_presetRegistry.ContainsKey(number))
                 return false;
@@ -142,7 +215,7 @@ namespace PS150.Core.ToneEngine
                     // násilně, co už zní". Necháme doznít přirozeným Release.
                     foreach (var note in _activeNotes)
                     {
-                        if (note.RegisterNumber == number)
+                        if (note.Register == number)
                         {
                             note.PendingRelease = false;
                             note.Voice.NoteOff();
@@ -159,7 +232,7 @@ namespace PS150.Core.ToneEngine
             }
         }
 
-        public bool IsRegisterActive(int number)
+        public bool IsRegisterActive(RegisterId number)
         {
             lock (_lock)
             {
@@ -167,7 +240,7 @@ namespace PS150.Core.ToneEngine
             }
         }
 
-        public IReadOnlyCollection<int> ActiveRegisters
+        public IReadOnlyCollection<RegisterId> ActiveRegisters
         {
             get
             {
@@ -195,13 +268,13 @@ namespace PS150.Core.ToneEngine
             {
                 bool drumChannel = channel == DrumChannel;
 
-                IEnumerable<int> registers;
+                IEnumerable<RegisterId> registers;
                 if (drumChannel)
-                    registers = new[] { DrumRegisterNumber };
+                    registers = new[] { DrumRegister };
                 else
                     registers = _activeRegisters.ToArray();
 
-                foreach (int registerNumber in registers)
+                foreach (var registerNumber in registers)
                 {
                     if (!_presetRegistry.TryGetValue(registerNumber, out var preset))
                         continue; // pro jistotu - nemělo by nastat
@@ -221,7 +294,15 @@ namespace PS150.Core.ToneEngine
                     // Pokud tahle kombinace (nota + rejstřík) už hraje, jen ji
                     // znovu "nadechneme" (retrigger), nevytváříme duplicitní instanci.
                     var existing = _activeNotes.Find(n =>
-                        n.NoteNumber == noteNumber && n.RegisterNumber == registerNumber);
+                        n.NoteNumber == noteNumber && n.Register == registerNumber);
+
+                    // krok17: vzorkový hlas se při opakovaném úderu neretriggeruje, starý se rychle umlčí a začne nový
+                    // (jiná rychlost úhozu = jiná vrstva vzorku).
+                    if (existing != null && preset.Instrument == InstrumentType.Sample)
+                    {
+                        (existing.Voice as SampleVoice)?.Choke();
+                        existing = null;
+                    }
 
                     if (existing != null)
                     {
@@ -232,16 +313,28 @@ namespace PS150.Core.ToneEngine
                         continue;
                     }
 
-                    var voice = CreateVoice(preset, noteNumber, _sampleRate);
+                    var voice = CreateVoice(preset, noteNumber, velocity, _sampleRate);
                     voice.Velocity = gain;
                     voice.NoteOn();
+
+                    // krok17: exkluzivní třída SF2 (hi-hat): nový úder umlčí ostatní hlasy stejné třídy v tomto rejstříku
+                    if (voice is SampleVoice sampleVoice && sampleVoice.ExclusiveClass > 0)
+                    {
+                        foreach (var other in _activeNotes)
+                        {
+                            if (other.Register == registerNumber && other.NoteNumber != noteNumber
+                                && other.Voice is SampleVoice ov && ov.ExclusiveClass == sampleVoice.ExclusiveClass)
+                                ov.Choke();
+                        }
+                    }
 
                     _activeNotes.Add(new ActiveNote
                     {
                         NoteNumber = noteNumber,
-                        RegisterNumber = registerNumber,
+                        Register = registerNumber,
                         Frequency = freq,
                         Voice = voice,
+                        UsesSustain = preset.Instrument == InstrumentType.Piano || preset.SustainPedal,
                         Instrument = preset.Instrument
                     });
                 }
@@ -262,7 +355,7 @@ namespace PS150.Core.ToneEngine
                     if (active.NoteNumber != noteNumber || active.Instrument == InstrumentType.Drums) continue;
 
                     // Sešlápnutý pedál drží klavírní noty, uvolní se až s ním.
-                    if (_sustainDown && active.Instrument == InstrumentType.Piano)
+                    if (_sustainDown && active.UsesSustain)
                         active.PendingRelease = true;
                     else
                         active.Voice?.NoteOff();
@@ -302,6 +395,8 @@ namespace PS150.Core.ToneEngine
                     return velocity;
                 case InstrumentType.Organ:
                     return 1.0;
+                case InstrumentType.Sample:
+                    return 1.0;   // krok17: dynamiku řeší vrstvy rychlosti ve vzorcích
                 default:
                     return 0.25 + 0.75 * velocity;
             }
@@ -309,10 +404,16 @@ namespace PS150.Core.ToneEngine
 
         // Vybere správnou třídu hlasu podle preset.Instrument. Všechny čtyři třídy
         // dědí ze SynthVoice, takže se dají držet v jednom společném seznamu.
-        private static SynthVoice CreateVoice(VoicePreset preset, int noteNumber, double sampleRate)
+        private static SynthVoice CreateVoice(VoicePreset preset, int noteNumber, double velocity, double sampleRate)
         {
             switch (preset.Instrument)
             {
+                case InstrumentType.Sample:
+                    {
+                        int vel127 = Math.Clamp((int)Math.Round(velocity * 127.0), 1, 127);
+                        var zones = preset.Sf2Preset?.Match(noteNumber, vel127) ?? new List<Sf2Zone>();
+                        return new SampleVoice(zones, sampleRate);
+                    }
                 case InstrumentType.Piano:
                     return new PianoVoice(preset, sampleRate);
                 case InstrumentType.Cembalo:
@@ -328,7 +429,8 @@ namespace PS150.Core.ToneEngine
                     return new DrumVoice(preset, noteNumber, sampleRate);
                 case InstrumentType.Organ:
                 default:
-                    return new OrganVoice(preset, sampleRate);
+                    // krok23: noteNumber se předává kvůli AmplitudeEnvelope (interpolace síly alikvot podle hrané noty).
+                    return new OrganVoice(preset, noteNumber, sampleRate);
             }
         }
 
