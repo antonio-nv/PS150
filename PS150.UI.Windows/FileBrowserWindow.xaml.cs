@@ -220,6 +220,10 @@ namespace PS150.UI.Windows
             // rejstříkem, když v souboru SF2 zrovna není (viz Sf2MidiSynth.Create).
             _midiPlayer.SetMidiMelodicRegister(_settings.MidiMelodicRegister);
 
+            // krok36: cesta k .op2/GENMIDI bance pro SoundBlaster (banku 8) je
+            // teď natvrdo odvozená v GmPianoMidiPlayer (OP2\GENMIDI.op2 vedle
+            // PS150.exe) - žádné nastavení přes settings.json.
+
             // NOVÉ: zjišťování externí zvukovky na síti (adresa je natvrdo v
             // NetworkDefaults). Chyba tady nesmí shodit start přehrávače.
             try

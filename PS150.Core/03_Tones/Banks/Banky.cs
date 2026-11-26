@@ -69,11 +69,11 @@
         public static readonly BankInfo Info = new BankInfo(Number, "Amiga", BankKind.Planned, "Původní číslování banky pro Amigu - doplní se.");
     }
 
-    /// <summary>Banka 8 - SoundBlaster. Původní číslování staré banky SoundBlaster - doplní se.</summary>
+    /// <summary>krok35: Banka 8 - SoundBlaster (OPL3 emulace, GM přes .op2/GENMIDI banku - viz OplMidiSynth).</summary>
     public static class _008_SoundBlaster
     {
         public const int Number = 8;
-        public static readonly BankInfo Info = new BankInfo(Number, "SoundBlaster", BankKind.Planned, "Původní číslování staré banky SoundBlaster - doplní se.");
+        public static readonly BankInfo Info = new BankInfo(Number, "SoundBlaster (OPL3)", BankKind.SoundFont, "OPL3 emulace (NukedOpl) s GM instrumentální sadou z .op2/GENMIDI banky (DMXOPL apod.) - pro hrubou orientaci v prohlížeči souborů.");
     }
 
     /// <summary>Seznam všech bank (nová banka = nová třída výš + řádek zde).</summary>

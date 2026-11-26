@@ -70,23 +70,65 @@ namespace PS150.UI.Windows
         // níž). Úmyslně oddělené od PS150.Core.Banks.BankTable (to je číselník
         // rejstříků živých varhan, ne přehrávacích enginů) - až přibude další
         // skutečně funkční engine (např. OPL/SoundBlaster), stačí ho sem přidat.
-        public static readonly int[] AvailablePlaybackBanks = { PS150.Core.Banks._003_MuseScore_General.Number };
+        // krok33: přidána _002_GeneralMIDI (stará dobrá GM banka) - dřív tu
+        // byla jen MuseScore_General, takže se na GM nedalo přepnout (ani
+        // šipkami/kolečkem - StepInList neměla kam skočit - ani ručně zadaným
+        // číslem natrvalo: zůstalo by to jen do příštího startu aplikace, pak
+        // by to tahle kontrola v FileBrowserWindow tiše vrátila zpátky
+        // na první dostupnou banku).
+        // krok35: přidána _008_SoundBlaster (OPL3 emulace přes .op2/GENMIDI banku,
+        // viz OplMidiSynth/OplGenMidiPath níž) - třetí možnost vedle MuseScore/GM.
+        public static readonly int[] AvailablePlaybackBanks =
+        {
+            PS150.Core.Banks._003_MuseScore_General.Number,
+            PS150.Core.Banks._002_GeneralMIDI.Number,
+            PS150.Core.Banks._008_SoundBlaster.Number,
+        };
 
         // krok30: totéž, ale pro kanál D10 (bicí) ZVLÁŠŤ - viz DualEngineMidiOut.
-        // Dnes je v seznamu stejná banka jako u AvailablePlaybackBanks (jiný
-        // engine pro bicí zatím není), ale pole jsou od sebe úmyslně nezávislá -
-        // až přibude např. OPL/SoundBlaster, přidá se sem i tam samostatně podle
-        // toho, jestli se hodí na tóny, na bicí, nebo na obojí.
-        public static readonly int[] AvailableDrumBanks = { PS150.Core.Banks._003_MuseScore_General.Number };
+        // krok33/35: stejné tři banky jako výš.
+        public static readonly int[] AvailableDrumBanks =
+        {
+            PS150.Core.Banks._003_MuseScore_General.Number,
+            PS150.Core.Banks._002_GeneralMIDI.Number,
+            PS150.Core.Banks._008_SoundBlaster.Number,
+        };
 
         private int _playbackBankNumber = PS150.Core.Banks._003_MuseScore_General.Number;
         private int _drumBankNumber = PS150.Core.Banks._003_MuseScore_General.Number;
+
+        // krok36: cesta k .op2 bance pro _008_SoundBlaster - natvrdo vedle
+        // PS150.exe, podadresář OP2\GENMIDI.op2 (viz screenshot uživatele -
+        // složka OP2 už tam je). Žádná položka v settings.json - uživatel
+        // hlásil, že ruční zápis do settings.json se při startu aplikace
+        // sám smazal (AppSettings o tom poli nevěděla, dokud nebyl projekt
+        // přeložený s touhle verzí - dokud se nepřeloží, serializace
+        // neznámou položku zahodí). Natvrdo odvozená cesta tenhle problém
+        // úplně obchází.
+        private static readonly string OplGenMidiPath =
+            System.IO.Path.Combine(AppContext.BaseDirectory, "OP2", "GENMIDI.op2");
 
         /// <summary>krok28: banka (engine) pro netbicí kanály .mid souborů - nezávislé na bankách živého hraní. Projeví se od příštího PlayAsync.</summary>
         public void SetMidiPlaybackBank(int bankNumber) => _playbackBankNumber = bankNumber;
 
         /// <summary>krok30: banka (engine) jen pro kanál D10 (bicí) .mid souborů - nezávislé na _playbackBankNumber i na bankách živého hraní. Projeví se od příštího PlayAsync.</summary>
         public void SetMidiDrumBank(int bankNumber) => _drumBankNumber = bankNumber;
+
+        /// <summary>
+        /// krok35/36: vytvoří engine podle čísla banky - buď Sf2MidiSynth (SF2
+        /// banky), nebo OplMidiSynth (_008_SoundBlaster, cesta k bance viz
+        /// OplGenMidiPath výš). Null, když se nepodaří (soubor chybí/banka se
+        /// nenačetla) - volající pak zkusí GS Wavetable záložku.
+        /// </summary>
+        private IMidiOut? CreateBankEngine(int bankNumber, bool isDrumEngine, int melodicRegister)
+        {
+            if (bankNumber == PS150.Core.Banks._008_SoundBlaster.Number)
+            {
+                if (!System.IO.File.Exists(OplGenMidiPath)) return null;
+                return OplMidiSynth.TryCreate(OplGenMidiPath, isDrumEngine, melodicRegister);
+            }
+            return Sf2MidiSynth.TryCreate(bankNumber, melodicRegister);
+        }
 
         // krok31: univerzální tónový rejstřík - 1-128 = vynutí tenhle GM
         // program na VŠECH netbicích kanálech (1 = Acoustic Grand Piano,
@@ -95,7 +137,16 @@ namespace PS150.UI.Windows
         private int _melodicRegister = 1;
 
         /// <summary>krok31: viz komentář u _melodicRegister výš. Projeví se od příštího PlayAsync.</summary>
-        public void SetMidiMelodicRegister(int gmProgram) => _melodicRegister = gmProgram;
+        public void SetMidiMelodicRegister(int gmProgram)
+        {
+            _melodicRegister = gmProgram;
+
+            // krok34: ZAŽIVA přepne i právě hrající soubor, pokud to aktuální
+            // engine umí (Sf2MidiSynth přes DualEngineMidiOut) - bez přerušení
+            // přehrávání. GS Wavetable záloha to neumí, tam se jen uloží hodnota
+            // pro příští PlayAsync (viz _melodicRegister výš).
+            if (_outputDevice is ISupportsMelodicRegister supported) supported.SetUniversalProgram(gmProgram);
+        }
 
         /// <summary>True = rytmika (kanál D10) hraje normálně, false = je umlčená - viz TogglePercussion().</summary>
         public bool DrumsEnabled => _drumsEnabled;
@@ -598,8 +649,8 @@ namespace PS150.UI.Windows
                 // se to navenek stejně jako dřív jeden sdílený engine.
                 // krok31: univerzální rejstřík se týká jen netbicích kanálů -
                 // drumEngine pořád jen bicí (D10), tam na tom nezáleží.
-                var tonalEngine = Sf2MidiSynth.TryCreate(_playbackBankNumber, _melodicRegister);
-                var drumEngine = Sf2MidiSynth.TryCreate(_drumBankNumber);
+                var tonalEngine = CreateBankEngine(_playbackBankNumber, isDrumEngine: false, _melodicRegister);
+                var drumEngine = CreateBankEngine(_drumBankNumber, isDrumEngine: true, melodicRegister: 1);
 
                 if (tonalEngine != null && drumEngine != null)
                 {
@@ -672,18 +723,29 @@ namespace PS150.UI.Windows
 
             ChannelsDetected?.Invoke(usedChannels);
 
-            // Natvrdo nastavíme klavír na všech 16 kanálech ještě PŘED přehráváním,
-            // ať soubor obsahuje jakékoliv nástroje - Program Change eventy ze
-            // souboru samotného níž v EventPlayed prostě zahodíme, takže naše
-            // nastavení nikdo nepřepíše.
+            // krok34: natvrdo nastavíme univerzální rejstřík na všech 16 kanálech
+            // ještě PŘED přehráváním - ale JEN když je nějaký vynucený
+            // (_melodicRegister != 0). Dřív se tu natvrdo posílal klavír vždycky
+            // a Program Change ze souboru se v EventPlayed níž zahazoval úplně -
+            // takže "0 = skutečné nástroje ze souboru" (viz SetMidiMelodicRegister)
+            // nemohlo nikdy nic udělat, protože klavír byl nastavený tady a
+            // skutečné nástroje ze souboru se nikdy nedostaly ani k enginu.
+            if (_melodicRegister != 0)
+            {
+                int gmProgram = Math.Clamp(_melodicRegister, 1, 128) - 1;
+                for (int channel = 0; channel <= 15; channel++)
+                {
+                    _outputDevice!.SendEvent(new ProgramChangeEvent((SevenBitNumber)gmProgram)
+                    {
+                        Channel = (FourBitNumber)channel
+                    });
+                }
+            }
+
             for (int channel = 0; channel <= 15; channel++)
             {
-                _outputDevice!.SendEvent(new ProgramChangeEvent((SevenBitNumber)AcousticGrandPiano)
-                {
-                    Channel = (FourBitNumber)channel
-                });
                 // Počáteční hlasitost podle aktuálního nastavení VGA konzole.
-                _outputDevice.SendEvent(new ControlChangeEvent(
+                _outputDevice!.SendEvent(new ControlChangeEvent(
                     (SevenBitNumber)VolumeControlNumber, (SevenBitNumber)ScaleToMidiVolume(127))
                 {
                     Channel = (FourBitNumber)channel
@@ -727,7 +789,15 @@ namespace PS150.UI.Windows
                         switch (e.Event)
                         {
                             case ProgramChangeEvent:
-                                // Ignorováno - nástroj je natvrdo klavír, viz výše.
+                                // krok34: Sf2-enginy (ISupportsMelodicRegister) si Program Change
+                                // sledují samy a použijí ho, jen když NENÍ vynucený univerzální
+                                // rejstřík (viz Sf2MidiSynth._channelProgram/GetMelodicPreset) - tam
+                                // je bezpečné posílat to vždycky, i kdyby se UniR za běhu přepnulo
+                                // zpátky na "skutečné nástroje" (krok34 - viz SetMidiMelodicRegister).
+                                // GS Wavetable záloha je ale jen hloupý průchod bez vlastní logiky -
+                                // tam musíme Program Change sami potlačit, dokud je rejstřík vynucený.
+                                if (_melodicRegister == 0 || _outputDevice is ISupportsMelodicRegister)
+                                    _outputDevice.SendEvent(e.Event);
                                 break;
 
                             case ControlChangeEvent panCc when panCc.ControlNumber == PanControlNumber:

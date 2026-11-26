@@ -22,7 +22,7 @@ namespace PS150.Core.Sampler
     ///
     /// Vlastní stereo výstup přes WaveOutEvent; výhledově půjde výstup do společné sběrnice s DSP.
     /// </summary>
-    public sealed class Sf2MidiSynth : ISampleProvider, IMidiOut
+    public sealed class Sf2MidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister
     {
         private const int Rate = 44100;
         private const int DrumChannel = 9;
@@ -40,7 +40,10 @@ namespace PS150.Core.Sampler
         // => každý kanál hraje svůj skutečný nástroj podle Program Change v
         // souboru (viz _channelProgram a GetMelodicPreset).
         private readonly Sf2Preset _defaultMelodic;              // B000:P000 - záloha, když se nenajde konkrétní rejstřík/program
-        private readonly Sf2Preset? _forcedMelodic;               // null = respektuj Program Change ze souboru
+        // krok34: NENÍ readonly - jde přepnout za běhu, viz SetUniversalProgram
+        // (ISupportsMelodicRegister). volatile - čte se z mixovacího vlákna v
+        // GetMelodicPreset, píše se z UI vlákna (FileBrowserWindow).
+        private volatile Sf2Preset? _forcedMelodic;               // null = respektuj Program Change ze souboru
         private readonly Dictionary<int, Sf2Preset> _melodicByProgram;   // B000:Pxxx podle GM programu (0-127), pro skutečné rejstříky
         private readonly int[] _channelProgram = new int[16];     // krok31: poslední Program Change na kanálu (jen když _forcedMelodic == null)
         private readonly Sf2Preset? _drums;
@@ -88,13 +91,26 @@ namespace PS150.Core.Sampler
         public string Description => _description;
 
         private Sf2MidiSynth(Sf2Preset defaultMelodic, Sf2Preset? drums,
-            Dictionary<int, Sf2Preset> melodicByProgram, Sf2Preset? forcedMelodic, string description)
+            Dictionary<int, Sf2Preset> melodicByProgram, string description)
         {
             _defaultMelodic = defaultMelodic;
             _description = description;
             _drums = drums;
             _melodicByProgram = melodicByProgram;
-            _forcedMelodic = forcedMelodic;
+        }
+
+        /// <summary>krok34: ISupportsMelodicRegister - přepne univerzální rejstřík ZA BĚHU (bez přerušení přehrávání).</summary>
+        public void SetUniversalProgram(int universalProgram)
+        {
+            if (universalProgram == 0)
+            {
+                _forcedMelodic = null;
+                return;
+            }
+
+            // "lidské" 1-128 (jak to zná organista z GM tabulky) -> MIDI program change 0-127.
+            int gmProgram = Math.Clamp(universalProgram, 1, 128) - 1;
+            _forcedMelodic = _melodicByProgram.TryGetValue(gmProgram, out var p) ? p : _defaultMelodic;
         }
 
         /// <summary>
@@ -133,18 +149,11 @@ namespace PS150.Core.Sampler
                 .GroupBy(p => p.Program)
                 .ToDictionary(g => g.Key, g => g.First());
 
-            Sf2Preset? forcedMelodic = null;
-            if (universalProgram != 0)
-            {
-                // "lidské" 1-128 (jak to zná organista z GM tabulky) -> MIDI program change 0-127.
-                int gmProgram = Math.Clamp(universalProgram, 1, 128) - 1;
-                forcedMelodic = melodicByProgram.TryGetValue(gmProgram, out var p) ? p : defaultMelodic;
-            }
-
             string description = (bankNumber.HasValue ? BankTable.Find(bankNumber.Value)?.FullName : null)
                 ?? Path.GetFileNameWithoutExtension(bank.Path);
 
-            var synth = new Sf2MidiSynth(defaultMelodic, drums, melodicByProgram, forcedMelodic, $"{description} (SF2)");
+            var synth = new Sf2MidiSynth(defaultMelodic, drums, melodicByProgram, $"{description} (SF2)");
+            synth.SetUniversalProgram(universalProgram);   // krok34: stejná metoda jako pro živou změnu za běhu
             if (play)
             {
                 // krok20: větší rezerva (150 ms) proti přerušování zvuku; u přehrávání souborů na latenci nezáleží.
