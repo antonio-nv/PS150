@@ -267,6 +267,40 @@ namespace PS150.Core.ToneEngine
             }
         }
 
+        /// <summary>
+        /// krok44: vypne VŠECHNY právě zatažené rejstříky a zapne JEN ten
+        /// zadaný - na rozdíl od ToggleRegister (pro živé hraní, kde se
+        /// rejstříky kombinují/tutti/pléno) tohle je pro přehrávání .mid
+        /// souborů přes syntetiku, kde stačí jeden rejstřík najednou (viz
+        /// SyntheticMidiSynth.SetSyntheticRegister). Neplatné číslo (není v
+        /// registru) celou operaci tiše přeskočí - nic se nezmění.
+        /// </summary>
+        public void SetSoleActiveRegister(RegisterId id)
+        {
+            if (!_presetRegistry.ContainsKey(id))
+                return;
+
+            lock (_lock)
+            {
+                foreach (var active in _activeRegisters.ToArray())
+                {
+                    if (active == id) continue;
+                    _activeRegisters.Remove(active);
+
+                    foreach (var note in _activeNotes)
+                    {
+                        if (note.Register == active)
+                        {
+                            note.PendingRelease = false;
+                            note.Voice.NoteOff();
+                        }
+                    }
+                }
+
+                _activeRegisters.Add(id);
+            }
+        }
+
         public IReadOnlyCollection<RegisterId> ActiveRegisters
         {
             get

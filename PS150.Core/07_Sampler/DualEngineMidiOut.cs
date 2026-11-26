@@ -13,7 +13,7 @@ namespace PS150.Core.Sampler
     /// jako kdyby hrály dvě různé aplikace najednou - zvuková karta/Windows je
     /// smíchá sama.
     /// </summary>
-    public sealed class DualEngineMidiOut : IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister
+    public sealed class DualEngineMidiOut : IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister, ISupportsSyntheticRegister
     {
         // Kanál D10 podle GM standardu je index 9 (kanály se číslují od 0) -
         // stejná konvence jako Sf2MidiSynth.DrumChannel / GmPianoMidiPlayer.PercussionChannel.
@@ -69,6 +69,12 @@ namespace PS150.Core.Sampler
         public void SetDrumProgram(int drumProgram)
         {
             if (_drums is ISupportsDrumRegister supported) supported.SetDrumProgram(drumProgram);
+        }
+
+        /// <summary>krok44: stejný princip jako SetUniversalProgram - přepošle na TÓNOVÝ engine (_tonal); kanál D10 se tímhle netýká.</summary>
+        public void SetSyntheticRegister(int registerNumber)
+        {
+            if (_tonal is ISupportsSyntheticRegister supported) supported.SetSyntheticRegister(registerNumber);
         }
     }
 }

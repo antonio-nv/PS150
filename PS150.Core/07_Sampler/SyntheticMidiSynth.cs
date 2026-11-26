@@ -30,9 +30,6 @@ namespace PS150.Core.Sampler
     ///    stejně nemají žádný vztah k číslům tvých Melzerových rejstříků
     ///    (1, 2, 85, 108, 200...), takže mapovat by se musely ručně, případ
     ///    od případu - to je oddělená budoucí práce.
-    ///  - univerzální rejstřík (UniR/DrmR) se touhle instancí zatím
-    ///    NEŘÍDÍ - jejich rozsah 0-128 stejně nepokryje čísla jako 200/300/
-    ///    600 z banky 1, takže by UniR dával falešný dojem, že něco ovládá.
     ///  - ladění/AJI/pitch bend z přehrávače se na tenhle engine zatím
     ///    NEAPLIKUJE - ToneEngine.NoteOn počítá kmitočet jen z čísla noty a
     ///    temperamentu rejstříku, ne z kmitočtu poslaného zvenčí.
@@ -45,36 +42,60 @@ namespace PS150.Core.Sampler
     /// kvadratická GM křivka (vol/127)^2 jako u Sf2MidiSynth, aplikovaná až
     /// na už smíchaný výstup ToneEngine.GenerateNextSample (ten engine si
     /// hlasitost jednotlivých kanálů/not mezi sebou nerozlišuje).
+    ///
+    /// krok44: pole UniR teď u téhle banky neznamená "GM program 0-127", ale
+    /// PŘÍMO číslo rejstříku z ToneEngine (Melzer 1-200, dál 200/300/400/
+    /// 500/501/600...) - viz ISupportsSyntheticRegister/SetSyntheticRegister.
+    /// Nastaví se přes ToneEngine.SetSoleActiveRegister (vypne ostatní
+    /// rejstříky, zapne jen tenhle) - kombinování víc rejstříků najednou
+    /// (tutti/pléno) zůstává jen živému hraní, pro .mid soubor stačí jeden.
     /// </summary>
-    public sealed class SyntheticMidiSynth : ISampleProvider, IMidiOut
+    public sealed class SyntheticMidiSynth : ISampleProvider, IMidiOut, ISupportsSyntheticRegister
     {
         private const int Rate = 44100;
         private const int VolumeControlNumber = 7;   // GM/MIDI CC7 = Channel Volume
 
         private readonly PS150.Core.ToneEngine.ToneEngine _engine;
+        private readonly int _bankNumber;
         private WaveOutEvent? _waveOut;
         private volatile float _volumeGain = 1.0f;    // (127/127)^2, dokud nepřijde CC7
 
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(Rate, 2);
         public string Description { get; }
 
-        private SyntheticMidiSynth(string description)
+        private SyntheticMidiSynth(string description, int bankNumber)
         {
             _engine = new PS150.Core.ToneEngine.ToneEngine(Rate);
+            _bankNumber = bankNumber;
             Description = description;
         }
 
         /// <summary>krok41: isDrumEngine jen kvůli popisku - ToneEngine sám pozná bicí kanál (D10) podle čísla kanálu, viz SendEvent.</summary>
         public static SyntheticMidiSynth Create(bool isDrumEngine)
         {
-            var synth = new SyntheticMidiSynth(isDrumEngine
-                ? "Syntetické zvuky, bicí (ToneEngine)"
-                : "Syntetické zvuky, tóny (ToneEngine)");
+            var synth = new SyntheticMidiSynth(
+                isDrumEngine
+                    ? "Syntetické zvuky, bicí (ToneEngine)"
+                    : "Syntetické zvuky, tóny (ToneEngine)",
+                isDrumEngine
+                    ? PS150.Core.Banks._009_SynteticBici.Number
+                    : PS150.Core.Banks._001_SyntetickeZvuky.Number);
 
             synth._waveOut = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 4 };
             synth._waveOut.Init(new SampleToWaveProvider16(synth));
             synth._waveOut.Play();
             return synth;
+        }
+
+        /// <summary>
+        /// krok44: viz ISupportsSyntheticRegister. 0 nebo neplatné (neexistující)
+        /// číslo se tiše ignoruje - ToneEngine.SetSoleActiveRegister sám nic
+        /// nezmění, zůstane hrát to, co bylo aktivní předtím.
+        /// </summary>
+        public void SetSyntheticRegister(int registerNumber)
+        {
+            if (registerNumber <= 0) return;
+            _engine.SetSoleActiveRegister(new PS150.Core.Input.RegisterId(_bankNumber, registerNumber));
         }
 
         public void SendEvent(MidiEvent midiEvent)

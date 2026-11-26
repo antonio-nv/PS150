@@ -181,16 +181,22 @@ namespace PS150.UI.Windows
         // podle Program Change na kanálu D10 v souboru.
         private int _drumRegister = 1;
 
-        /// <summary>krok31: viz komentář u _melodicRegister výš. Projeví se od příštího PlayAsync.</summary>
+        /// <summary>
+        /// krok31: viz komentář u _melodicRegister výš. Projeví se od příštího PlayAsync.
+        /// krok44: u syntetické banky (_001_SyntetickeZvuky) tahle hodnota NEZNAMENÁ
+        /// GM program 0-127, ale PŘÍMO číslo rejstříku z ToneEngine (200, 300,
+        /// 600...) - viz ISupportsSyntheticRegister/SyntheticMidiSynth.
+        /// </summary>
         public void SetMidiMelodicRegister(int gmProgram)
         {
             _melodicRegister = gmProgram;
 
-            // krok34: ZAŽIVA přepne i právě hrající soubor, pokud to aktuální
-            // engine umí (Sf2MidiSynth přes DualEngineMidiOut) - bez přerušení
-            // přehrávání. GS Wavetable záloha to neumí, tam se jen uloží hodnota
-            // pro příští PlayAsync (viz _melodicRegister výš).
+            // krok34/44: ZAŽIVA přepne i právě hrající soubor, pokud to aktuální
+            // engine umí (Sf2MidiSynth nebo SyntheticMidiSynth přes DualEngineMidiOut)
+            // - bez přerušení přehrávání. GS Wavetable záloha to neumí, tam se jen
+            // uloží hodnota pro příští PlayAsync (viz _melodicRegister výš).
             if (_outputDevice is ISupportsMelodicRegister supported) supported.SetUniversalProgram(gmProgram);
+            else if (_outputDevice is ISupportsSyntheticRegister syntheticSupported) syntheticSupported.SetSyntheticRegister(gmProgram);
         }
 
         /// <summary>krok37: totéž, ale pro bicí sadu (kit), viz komentář u _drumRegister výš. Projeví se od příštího PlayAsync.</summary>
@@ -796,7 +802,17 @@ namespace PS150.UI.Windows
             // skutečné nástroje ze souboru se nikdy nedostaly ani k enginu.
             // krok37: kanál D10 (bicí) vynecháváme - ten má teď VLASTNÍ rejstřík
             // (_drumRegister, viz blok hned pod tímhle).
-            if (_melodicRegister != 0)
+            // krok44: u syntetické banky (_001_SyntetickeZvuky) _melodicRegister
+            // NENÍ GM program 0-127, ale přímo číslo rejstříku z ToneEngine (až
+            // 999) - poslat ho jako ProgramChangeEvent by přeteklo SevenBitNumber
+            // (0-127) a navíc by ho SyntheticMidiSynth stejně ignoroval (Program
+            // Change se u něj nesleduje). Místo toho jde rovnou přes
+            // ISupportsSyntheticRegister.
+            if (_melodicRegister != 0 && _outputDevice is ISupportsSyntheticRegister syntheticSupported)
+            {
+                syntheticSupported.SetSyntheticRegister(_melodicRegister);
+            }
+            else if (_melodicRegister != 0)
             {
                 int gmProgram = Math.Clamp(_melodicRegister, 1, 128) - 1;
                 for (int channel = 0; channel <= 15; channel++)

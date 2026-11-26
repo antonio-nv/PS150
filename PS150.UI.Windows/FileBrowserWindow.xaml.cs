@@ -121,7 +121,7 @@ namespace PS150.UI.Windows
         private FormField _fAji = null!;
         private FormField _fMidiBank = null!;   // krok28: banka pro přehrávání .mid (netbicí kanály) - nezávislá na živém hraní
         private FormField _fDrumBank = null!;   // krok30: banka jen pro kanál D10 (bicí) u .mid - nezávislá na _fMidiBank i na živém hraní
-        private FormField _fMelodicRegister = null!;   // krok31: univerzální tónový rejstřík (1-128), 0 = skutečné nástroje ze souboru
+        private FormField _fMelodicRegister = null!;   // krok31: univerzální tónový rejstřík (1-128 u SF2/OPL, krok44: přímo číslo rejstříku 1-999 u syntetiky), 0 = skutečné nástroje ze souboru
         private FormField _fDrumRegister = null!;   // krok37: totéž, ale bicí sada (kit) na kanálu D10, 0 = skutečná sada ze souboru
 
         // krok16: rejstřík = banka + číslo + zap/vyp, stejná pole jako všechno ostatní (Tab, kolečko, +/-, číslice, Enter).
@@ -970,13 +970,19 @@ namespace PS150.UI.Windows
             _fMidiBank = _form.Add(pMidiBank);
 
             // krok31: univerzální tónový rejstřík pro netbicí kanály .mid souboru -
-            // "lidské" GM číslování 1-128 (1 = Acoustic Grand Piano, staré
-            // natvrdo zapsané chování). 0 = žádný univerzální rejstřík - hrají
-            // skutečné nástroje podle Program Change v souboru (viz Sf2MidiSynth).
+            // u SF2/OPL bank "lidské" GM číslování 1-128 (1 = Acoustic Grand
+            // Piano, staré natvrdo zapsané chování). 0 = žádný univerzální
+            // rejstřík - hrají skutečné nástroje podle Program Change v souboru
+            // (viz Sf2MidiSynth).
             // krok37: pole UniR teď navazuje hned na MidB (banka + její rejstřík
             // pohromadě), DrmB/DrmR mají stejnou dvojici hned za sebou níž.
+            // krok44: rozsah rozšířen na 0-999 - u syntetické banky (MidB=001)
+            // totiž tohle pole neznamená GM program, ale PŘÍMO číslo rejstříku
+            // z ToneEngine (200 = Piano Petrof, 300 = Cembalo, 600 = Strings...
+            // viz ISupportsSyntheticRegister/SyntheticMidiSynth) - 0-128 by na
+            // taková čísla nestačilo a zadání by skončilo červeně jako chyba.
             var pMelodicRegister = Parameter.Number(
-                "UniR", "", 0, 128, 0, new[] { 1.0, 1.0, 10.0 },
+                "UniR", "", 0, 999, 0, new[] { 1.0, 1.0, 10.0 },
                 () => _settings.MidiMelodicRegister,
                 v =>
                 {
@@ -986,7 +992,7 @@ namespace PS150.UI.Windows
                     ScheduleSettingsSave();
                 },
                 zeroPad: 3,
-                defaultValue: 1.0);   // '*' vrátí na výchozí Acoustic Grand Piano
+                defaultValue: 1.0);   // '*' vrátí na výchozí rejstřík č. 1 (Acoustic Grand Piano u SF2/OPL, Bombard16 u syntetiky)
             _fMelodicRegister = _form.Add(pMelodicRegister);
 
             // krok30: totéž, ale jen pro kanál D10 (bicí) - viz DualEngineMidiOut.
