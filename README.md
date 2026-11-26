@@ -11,6 +11,7 @@ rozšíření (elektronické varhany na Raspberry Pi).
 - **PS150.Core** – SW syntezátor zvuku (oscilátory, obálky, filtry, hlasy nástrojů). Společné metody pro přehrávač souborů
 - **PS150.Analyzer** – SW analyzátor zvuku s 2D grafy (WPF).
 - **PS150.Raspi** – plánovaný hardwarový syntezátor (Raspberry Pi, HiFiBerry DAC8x, MIDI in/out, GPIO ovládání kláves).
+- **PS150.Asrock** – plánovaný hardwarový syntezátor (PC).
 
 ## Stav projektu
 
