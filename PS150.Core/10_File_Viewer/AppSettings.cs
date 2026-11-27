@@ -29,6 +29,26 @@ namespace PS150.Core
         // NOVÉ: AJI (adaptivní čisté ladění .mid souborů, klávesa a) zapnuto/vypnuto.
         public bool AjiEnabled { get; set; } = false;
 
+        // krok67: ladění/transpozice pro ŽIVÉ hraní (viz FileBrowserWindow.
+        // ApplyLiveTuning/App.OrganEngine) - ÚMYSLNĚ nezávislé na
+        // TuningTransposeSemitones/TuningReferenceA4Hz výš, to je jen pro
+        // přehrávač .mid.
+        public double LiveTransposeSemitones { get; set; } = 0.0;
+        public double LiveReferenceA4Hz { get; set; } = 440.0;
+
+        // krok69: AJI pro ŽIVÉ hraní (viz FileBrowserWindow/PS150.Core.ToneEngine.
+        // LiveAjiSettings) - uloženo jako prostá čísla (ne enum), ať se starý
+        // settings.json dál normálně načte, i kdyby se pořadí režimů/ladění
+        // někdy přeskládalo.
+        public int LiveAjiMode { get; set; } = 0;              // 0=Vyp, 1=Pevná, 2=Auto
+        public int LiveAjiTemperament { get; set; } = 0;       // 0=JI-5, 1=Stredot., 2=Pythag.
+        public int LiveAjiFixedTonicPc { get; set; } = 0;      // 0=C...11=H
+        public bool LiveAjiFixedIsMinor { get; set; } = false;
+        public double LiveAjiWindowSeconds { get; set; } = PS150.Core.AjiPlanner.WindowSeconds;
+        public double LiveAjiHopSeconds { get; set; } = PS150.Core.AjiPlanner.HopSeconds;
+        public double LiveAjiSwitchMargin { get; set; } = PS150.Core.AjiPlanner.SwitchMargin;
+        public int LiveAjiMinSwitchHops { get; set; } = PS150.Core.AjiPlanner.MinSwitchHops;
+
         // krok28: banka (engine), kterou GmPianoMidiPlayer použije pro přehrávání
         // NEBICÍCH kanálů .mid souborů v prohlížeči - ÚMYSLNĚ nezávislé na
         // bankách živého hraní (TE.Banks/App.OrganEngine). Viz
@@ -111,4 +131,4 @@ namespace PS150.Core
         }
 
     }
-}
+}

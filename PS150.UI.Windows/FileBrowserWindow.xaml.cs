@@ -38,13 +38,16 @@ namespace PS150.UI.Windows
         // to naopak vysoký úzký pruh.
         private const int Cols = 121;
 
-        // Záhlaví má pevné čtyři řádky:
+        // Záhlaví má pevných pět řádků:
         //   0 titulek okna (vlastní) + transportní tlačítka + [_] [X]
         //   1 cesta a jméno souboru (jeden řádek, bez zalomení)
-        //   2 VU metry L a P (u MIDI přehled)
-        //   3 čas, hlasitost, ladění, AJI, výstup
+        //   2 VU metry L a P (krok46: teď VŽDY, i u .mid souborů - dřív se tu
+        //     u .mid souborů kreslil řádek "MIDI (engine)...", VU metry se
+        //     tím pádem vůbec nezobrazily, i když se peak už dávno měřil)
+        //   3 "MIDI (engine), kanálů: N" (jen u .mid souborů, jinak prázdné)
+        //   4 čas, hlasitost, ladění, AJI, výstup
         // Vše další (zadávání ladění, varhanní panel, MIDI osnovy) se kreslí pod ně.
-        private const int HeaderRows = 4;
+        private const int HeaderRows = 5;
 
         // Sloupec, kde v titulku začínají transportní tlačítka [<<] [►] [▄] [>>].
         private const int TransportCol = 20;
@@ -124,13 +127,53 @@ namespace PS150.UI.Windows
         private FormField _fMelodicRegister = null!;   // krok31: univerzální tónový rejstřík (1-128 u SF2/OPL, krok44: přímo číslo rejstříku 1-999 u syntetiky), 0 = skutečné nástroje ze souboru
         private FormField _fDrumRegister = null!;   // krok37: totéž, ale bicí sada (kit) na kanálu D10, 0 = skutečná sada ze souboru
 
-        // krok16: rejstřík = banka + číslo + zap/vyp, stejná pole jako všechno ostatní (Tab, kolečko, +/-, číslice, Enter).
+        // krok16: rejstřík = banka + číslo, stejná pole jako všechno ostatní (Tab, kolečko, +/-, číslice, Enter).
         // Pole jsou přidána AŽ ZA ostatní, aby pořadí Tab odpovídalo pořadí na obrazovce.
+        // krok55: tohle byl dřív JEDEN sdílený řádek pro libovolnou banku (melodickou
+        // i bicí dohromady, přepínalo se ručně v poli Banka). Teď je z něj melodický
+        // řádek (Banka je omezená na nebicí banky, viz DrumBankNumber níž) a vedle
+        // něj přibyl úplně stejný, ale nezávislý řádek jen pro bicí banku/rejstřík.
+        // krok56: samostatné pole Zap zmizelo - zapnutí/vypnutí je teď jen "číslo +
+        // Enter" (OnTypedCommit, jako dřív), a jestli je rejstřík aktivní se pozná
+        // podle podbarvení v seznamu rejstříků za polem Rej (viz WrapRegisterNames).
         private FormField _fRegBank = null!;
         private FormField _fRegNumber = null!;
-        private FormField _fRegOn = null!;
-        private int _selBank = 1;      // vybraná banka (zatím nemusí být zapnutá)
-        private int _selNumber = 1;    // vybraný rejstřík v bance
+        private int _selBank = 1;      // vybraná MELODICKÁ banka (zatím nemusí být zapnutá)
+        private int _selNumber = 1;    // vybraný rejstřík v ní
+
+        // krok67: ladění/transpozice PRO ŽIVÉ HRANÍ - nezávislé na _fTranspose/_fA4
+        // výš (to je ladění přehrávače .mid, PlayerTuning). Hodnoty samotné žijí
+        // v App.OrganEngine (AudioEngine -> ToneEngine), tahle pole jsou jen UI.
+        private FormField _fLiveTranspose = null!;
+        private FormField _fLiveA4 = null!;
+
+        // krok69: AJI pro ŽIVÉ hraní - viz PS150.Core.ToneEngine.LiveAjiSettings.
+        // Hodnoty žijí v App.OrganEngine.LiveAji, tahle pole jsou jen UI (+ uložení
+        // do settings.json, viz ApplyLiveAji*).
+        private FormField _fLiveAjiMode = null!;
+        private FormField _fLiveAjiTemperament = null!;
+        private FormField _fLiveAjiTonic = null!;
+        private FormField _fLiveAjiMinor = null!;
+        private FormField _fLiveAjiWindow = null!;
+        private FormField _fLiveAjiHop = null!;
+        private FormField _fLiveAjiMargin = null!;
+        private FormField _fLiveAjiMinHops = null!;
+
+        // krok69: jména pro čísla výš (jen pro vykreslení, viz RenderLiveAjiRows).
+        private static readonly string[] LiveAjiModeNames = { "Vyp", "Pevna", "Auto" };
+        private static readonly string[] LiveAjiTemperamentNames = { "JI-5", "Stredot.", "Pythag." };
+        private static readonly string[] LiveAjiTonicNames =
+            { "C", "Cis", "D", "Es", "E", "F", "Fis", "G", "As", "A", "B", "H" };
+
+        private FormField _fLiveDrmBank = null!;
+        private FormField _fLiveDrmNumber = null!;
+        private int _selLiveDrmBank = PS150.Core.Banks._009_SynteticBici.Number;   // vybraná BICÍ banka
+        private int _selLiveDrmNumber = 1;                                        // vybraný rejstřík v ní
+
+        // krok55: jediná banka, co dnes hraje bicí - melodický řádek ji ze svého
+        // výběru vylučuje, bicí řádek se naopak drží jen jí. Až vznikne druhá
+        // bicí banka, přibude sem.
+        private const int DrumBankNumber = PS150.Core.Banks._009_SynteticBici.Number;
 
         // Odložené ukládání nastavení: kolečko dělá desítky změn za sekundu,
         // settings.json se zapíše až po chvíli klidu (a při zavření okna).
@@ -198,6 +241,25 @@ namespace PS150.UI.Windows
             // NOVÉ: AJI uložené z minula (klávesa a).
             _midiPlayer.SetAjiEnabled(_settings.AjiEnabled);
 
+            // krok67: ladění pro ŽIVÉ hraní uložené z minula - nezávislé na _tuning výš.
+            if (App.OrganEngine != null)
+            {
+                App.OrganEngine.LiveTransposeSemitones = _settings.LiveTransposeSemitones;
+                App.OrganEngine.LiveReferenceA4Hz = _settings.LiveReferenceA4Hz;
+
+                // krok69: totéž pro AJI (živé hraní) - viz CreateFormFields.
+                var liveAji = App.OrganEngine.LiveAji;
+                liveAji.Mode = (PS150.Core.ToneEngine.LiveAjiMode)_settings.LiveAjiMode;
+                liveAji.Temperament = (PS150.Core.AjiTemperament)_settings.LiveAjiTemperament;
+                liveAji.FixedTonicPc = _settings.LiveAjiFixedTonicPc;
+                liveAji.FixedIsMinor = _settings.LiveAjiFixedIsMinor;
+                liveAji.WindowSeconds = _settings.LiveAjiWindowSeconds;
+                liveAji.HopSeconds = _settings.LiveAjiHopSeconds;
+                liveAji.SwitchMargin = _settings.LiveAjiSwitchMargin;
+                liveAji.MinSwitchHops = _settings.LiveAjiMinSwitchHops;
+                App.OrganEngine.ResetLiveAjiDetector();
+            }
+
             // krok28: přehrávací banka pro .mid soubory uložená z minula -
             // nezávislá na bankách živého hraní. Když uložené číslo mezitím
             // přestalo být dostupné (např. jsme banku zatím nedoimplementovali),
@@ -214,12 +276,14 @@ namespace PS150.UI.Windows
                 : GmPianoMidiPlayer.AvailableDrumBanks[0];
             _midiPlayer.SetMidiDrumBank(savedDrumBank);
 
-            // krok31: univerzální tónový rejstřík uložený z minula (0-128,
+            // krok31: univerzální tónový rejstřík uložený z minula (0-999,
             // viz pole UniR). Tady se netřeba hlídat proti nedostupné hodnotě
-            // jako u bank výš - celý rozsah 0-128 je vždycky platný, jen 0
-            // znamená "žádný" a 1-128 se případně samo nahradí výchozím
-            // rejstříkem, když v souboru SF2 zrovna není (viz Sf2MidiSynth.Create).
-            _midiPlayer.SetMidiMelodicRegister(_settings.MidiMelodicRegister);
+            // jako u bank výš - u SF2/OPL je celý rozsah 1-128 vždycky platný
+            // (případně se sám nahradí výchozím rejstříkem, když v souboru SF2
+            // zrovna není - viz Sf2MidiSynth.Create), u syntetiky se přichytí
+            // na nejbližší definovaný (krok45) - a uloženou hodnotu rovnou
+            // opravíme, kdyby se uložilo číslo platné jen pro jinou banku.
+            _settings.MidiMelodicRegister = _midiPlayer.SetMidiMelodicRegister(_settings.MidiMelodicRegister);
 
             // krok37: totéž, ale pro bicí sadu (kit) na kanálu D10 - viz pole DrmR.
             _midiPlayer.SetMidiDrumRegister(_settings.MidiDrumRegister);
@@ -651,16 +715,18 @@ namespace PS150.UI.Windows
                 }
             }
 
-            // L/R (zvukovka) jen když skutečně hraje soubor přes AudioPlayer
-            // - u .mid souborů jde zvuk mimo AudioPlayer (Windows GS
-            // Wavetable Synth), takže by tu nebylo co měřit.
-            if (!_isMidiMode)
-            {
-                var (peakL, peakR) = _audioPlayer.ReadPeakLevels();
-                float organPeakForLR = App.OrganEngine?.ReadPeak() ?? 0f;
-                _leftDb = AudioMeter.LinearToDecibels(Math.Max(peakL, organPeakForLR));
-                _rightDb = AudioMeter.LinearToDecibels(Math.Max(peakR, organPeakForLR));
-            }
+            // krok46: L/R VU metr - u normálních souborů z AudioPlayer, u .mid
+            // souborů teď z _midiPlayer (Sf2MidiSynth/OplMidiSynth/
+            // SyntheticMidiSynth přes DualEngineMidiOut - viz
+            // IProvidesAudioMeter). Dřív se u .mid souborů měření přeskakovalo
+            // úplně - to byl ještě komentář z dob, kdy .mid hrálo čistě přes
+            // Windows GS Wavetable Synth (externí, nepřístupné vzorky) a
+            // doopravdy nebylo co měřit. Teď vlastní vzorky máme, takže se
+            // měří pořád, jen ze dvou různých zdrojů podle režimu.
+            var (peakL, peakR) = _isMidiMode ? _midiPlayer.ReadPeakLevels() : _audioPlayer.ReadPeakLevels();
+            float organPeakForLR = App.OrganEngine?.ReadPeak() ?? 0f;
+            _leftDb = AudioMeter.LinearToDecibels(Math.Max(peakL, organPeakForLR));
+            _rightDb = AudioMeter.LinearToDecibels(Math.Max(peakR, organPeakForLR));
 
             // Záhlaví (včetně VU metrů) se kreslí až po změření úrovní výše.
             RenderDashboard();
@@ -882,6 +948,39 @@ namespace PS150.UI.Windows
         }
 
         /// <summary>
+        /// krok67: totéž jako ApplyTuning výš, ale pro ŽIVÉ hraní (App.OrganEngine) -
+        /// úmyslně nezávislé na _tuning/ApplyTuning (přehrávač .mid). Hodnoty žijí
+        /// přímo v AudioEngine/ToneEngine, tady se jen zapíšou + uloží do settings.json.
+        /// </summary>
+        private void ApplyLiveTuning(double transposeSemitones, double referenceA4Hz)
+        {
+            if (App.OrganEngine == null) return;
+
+            App.OrganEngine.LiveTransposeSemitones = transposeSemitones;
+            App.OrganEngine.LiveReferenceA4Hz = referenceA4Hz;
+
+            _settings.LiveTransposeSemitones = transposeSemitones;
+            _settings.LiveReferenceA4Hz = referenceA4Hz;
+            ScheduleSettingsSave();
+        }
+
+        /// <summary>
+        /// krok69: po jakékoliv změně AJI nastavení pro ŽIVÉ hraní (App.OrganEngine.
+        /// LiveAji.* se upraví přímo v setteru pole - viz CreateFormFields) tohle
+        /// uloží settings.json a hlavně přepočítá právě podržené tóny (ApplyLiveAji),
+        /// ať se to projeví okamžitě - stejný "glissando" princip jako krok68.
+        /// resetDetector: true u všeho, co mění, JAK se AutoDetect dívá na minulost
+        /// (mód, okno, krok, práh, minKroků) - ať nezůstane napůl rozkoukaný podle
+        /// starých pravidel.
+        /// </summary>
+        private void ApplyLiveAjiAndSave(bool resetDetector)
+        {
+            if (resetDetector) App.OrganEngine?.ResetLiveAjiDetector();
+            App.OrganEngine?.ApplyLiveAji();
+            ScheduleSettingsSave();
+        }
+
+        /// <summary>
         /// krok29: náhrada za starý samostatný přepínač "Lad zap/vyp".
         /// Když je ladění zrovna nastavené na něco (T!=0 nebo A4!=440),
         /// zapamatuje si to a přepne na neutrál (0 st / 440 Hz).
@@ -987,8 +1086,12 @@ namespace PS150.UI.Windows
                 v =>
                 {
                     int program = (int)Math.Round(v);
-                    _midiPlayer.SetMidiMelodicRegister(program);
-                    _settings.MidiMelodicRegister = program;
+                    // krok45: SetMidiMelodicRegister vrací efektivně použité číslo -
+                    // u syntetiky se zadání může "přichytit" na nejbližší skutečně
+                    // definovaný rejstřík (viz komentář u metody), takže se do pole/
+                    // settings uloží TOHLE, ne to, co se doslova naťukalo.
+                    int effective = _midiPlayer.SetMidiMelodicRegister(program);
+                    _settings.MidiMelodicRegister = effective;
                     ScheduleSettingsSave();
                 },
                 zeroPad: 3,
@@ -1033,9 +1136,145 @@ namespace PS150.UI.Windows
                 defaultValue: 1.0);   // '*' vrátí na výchozí Standard kit
             _fDrumRegister = _form.Add(pDrumRegister);
 
-            // ---- krok16: banka, rejstřík, zap/vyp ----
-            var banks = TE.Banks;
-            _selBank = banks.Count > 0 ? banks[0] : 1;
+            // ---- krok67: ladění/transpozice pro ŽIVÉ hraní - vlastní řádek, nezávislý
+            // na ladění přehrávače .mid (_fTranspose/_fA4 výš). Hodnoty žijí přímo
+            // v App.OrganEngine, pole je jen čtou/zapisují (viz ApplyLiveTuning). ----
+            var pLiveTranspose = Parameter.Number(
+                "T", "st",
+                -PlayerTuning.MaxTransposeSemitones, PlayerTuning.MaxTransposeSemitones, 2,
+                new[] { 0.01, 0.5, 1.0 },
+                () => App.OrganEngine?.LiveTransposeSemitones ?? 0.0,
+                v => ApplyLiveTuning(v, App.OrganEngine?.LiveReferenceA4Hz ?? 440.0),
+                showSign: true,
+                defaultValue: 0.0);   // '*' vrátí transpozici na nulu
+            _fLiveTranspose = _form.Add(pLiveTranspose);
+
+            var pLiveA4 = Parameter.Number(
+                "A4", "Hz",
+                PlayerTuning.MinReferenceA4Hz, PlayerTuning.MaxReferenceA4Hz, 1,
+                new[] { 0.1, 1.0, 5.0 },
+                () => App.OrganEngine?.LiveReferenceA4Hz ?? 440.0,
+                v => ApplyLiveTuning(App.OrganEngine?.LiveTransposeSemitones ?? 0.0, v),
+                defaultValue: 440.0);   // '*' vrátí A4 na 440 Hz
+            _fLiveA4 = _form.Add(pLiveA4);
+
+            // ---- krok69: AJI pro ŽIVÉ hraní - "čím víc nastavování, tím líp" ----
+            // krok69: NEukládat App.OrganEngine?.LiveAji do proměnné tady nahoře -
+            // volá se to znovu při KAŽDÉM čtení/zápisu (stejně jako u ostatních polí
+            // výš, např. LiveTransposeSemitones), aby se nezatuhlo na null, kdyby
+            // tahle metoda náhodou proběhla dřív, než se App.OrganEngine vůbec stihl
+            // nastavit.
+            PS150.Core.ToneEngine.LiveAjiSettings? Aji() => App.OrganEngine?.LiveAji;
+
+            var pLiveAjiMode = Parameter.Number(
+                "Mod", "", 0, 2, 0, new[] { 1.0, 1.0, 1.0 },
+                () => (double)(Aji()?.Mode ?? PS150.Core.ToneEngine.LiveAjiMode.Off),
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().Mode = (PS150.Core.ToneEngine.LiveAjiMode)(int)Math.Round(v);
+                    _settings.LiveAjiMode = (int)Aji().Mode;
+                    ApplyLiveAjiAndSave(resetDetector: true);
+                },
+                defaultValue: 0.0);
+            _fLiveAjiMode = _form.Add(pLiveAjiMode);
+
+            var pLiveAjiTemperament = Parameter.Number(
+                "Lad", "", 0, 2, 0, new[] { 1.0, 1.0, 1.0 },
+                () => (double)(Aji()?.Temperament ?? PS150.Core.AjiTemperament.JustIntonation5Limit),
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().Temperament = (PS150.Core.AjiTemperament)(int)Math.Round(v);
+                    _settings.LiveAjiTemperament = (int)Aji().Temperament;
+                    ApplyLiveAjiAndSave(resetDetector: false);
+                },
+                defaultValue: 0.0);
+            _fLiveAjiTemperament = _form.Add(pLiveAjiTemperament);
+
+            var pLiveAjiTonic = Parameter.Number(
+                "Ton", "", 0, 11, 0, new[] { 1.0, 1.0, 1.0 },
+                () => Aji()?.FixedTonicPc ?? 0,
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().FixedTonicPc = (int)Math.Round(v);
+                    _settings.LiveAjiFixedTonicPc = Aji().FixedTonicPc;
+                    ApplyLiveAjiAndSave(resetDetector: false);
+                },
+                defaultValue: 0.0);
+            _fLiveAjiTonic = _form.Add(pLiveAjiTonic);
+
+            var pLiveAjiMinor = Parameter.Toggle(
+                "Moll",
+                () => Aji()?.FixedIsMinor ?? false,
+                on =>
+                {
+                    if (Aji() == null) return;
+                    Aji().FixedIsMinor = on;
+                    _settings.LiveAjiFixedIsMinor = on;
+                    ApplyLiveAjiAndSave(resetDetector: false);
+                });
+            _fLiveAjiMinor = _form.Add(pLiveAjiMinor);
+
+            // ---- krok69: parametry AutoDetect - "ať se v tom teoretici můžou šťourat" ----
+            var pLiveAjiWindow = Parameter.Number(
+                "Okno", "s", 1.0, 60.0, 1, new[] { 0.5, 1.0, 5.0 },
+                () => Aji()?.WindowSeconds ?? PS150.Core.AjiPlanner.WindowSeconds,
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().WindowSeconds = v;
+                    _settings.LiveAjiWindowSeconds = v;
+                    ApplyLiveAjiAndSave(resetDetector: true);
+                },
+                defaultValue: PS150.Core.AjiPlanner.WindowSeconds);
+            _fLiveAjiWindow = _form.Add(pLiveAjiWindow);
+
+            var pLiveAjiHop = Parameter.Number(
+                "Krok", "s", 0.2, 10.0, 1, new[] { 0.1, 0.5, 2.0 },
+                () => Aji()?.HopSeconds ?? PS150.Core.AjiPlanner.HopSeconds,
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().HopSeconds = v;
+                    _settings.LiveAjiHopSeconds = v;
+                    ApplyLiveAjiAndSave(resetDetector: true);
+                },
+                defaultValue: PS150.Core.AjiPlanner.HopSeconds);
+            _fLiveAjiHop = _form.Add(pLiveAjiHop);
+
+            var pLiveAjiMargin = Parameter.Number(
+                "Prah", "", 0.0, 1.0, 2, new[] { 0.01, 0.05, 0.1 },
+                () => Aji()?.SwitchMargin ?? PS150.Core.AjiPlanner.SwitchMargin,
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().SwitchMargin = v;
+                    _settings.LiveAjiSwitchMargin = v;
+                    ApplyLiveAjiAndSave(resetDetector: true);
+                },
+                defaultValue: PS150.Core.AjiPlanner.SwitchMargin);
+            _fLiveAjiMargin = _form.Add(pLiveAjiMargin);
+
+            var pLiveAjiMinHops = Parameter.Number(
+                "MinKr", "", 1, 20, 0, new[] { 1.0, 1.0, 5.0 },
+                () => Aji()?.MinSwitchHops ?? PS150.Core.AjiPlanner.MinSwitchHops,
+                v =>
+                {
+                    if (Aji() == null) return;
+                    Aji().MinSwitchHops = (int)Math.Round(v);
+                    _settings.LiveAjiMinSwitchHops = Aji().MinSwitchHops;
+                    ApplyLiveAjiAndSave(resetDetector: true);
+                },
+                defaultValue: PS150.Core.AjiPlanner.MinSwitchHops);
+            _fLiveAjiMinHops = _form.Add(pLiveAjiMinHops);
+
+            // ---- krok16/krok55: banka, rejstřík, zap/vyp - melodický řádek ----
+            // Banka smí být jen NEBICÍ (DrumBankNumber vyřazen) - bicí má svůj vlastní
+            // řádek kus níž, ať se živé hraní neplete melodii s bicí soupravou.
+            var melBanks = TE.Banks.Where(b => b != DrumBankNumber).ToList();
+            _selBank = melBanks.Count > 0 ? melBanks[0] : 1;
             var nums = TE.NumbersInBank(_selBank);
             _selNumber = nums.Count > 0 ? nums[0] : 0;
 
@@ -1044,7 +1283,7 @@ namespace PS150.UI.Windows
                 () => _selBank,
                 v => SelectBank((int)Math.Round(v)),
                 zeroPad: 3);
-            pBank.Stepper = (cur, dir) => StepInList(TE.Banks, cur, dir);   // +/- procházejí existující banky
+            pBank.Stepper = (cur, dir) => StepInList(melBanks, cur, dir);   // +/- procházejí jen melodické banky
             _fRegBank = _form.Add(pBank);
 
             var pNum = Parameter.Number(
@@ -1054,26 +1293,73 @@ namespace PS150.UI.Windows
                 zeroPad: 3);
             pNum.Stepper = (cur, dir) => StepInList(TE.NumbersInBank(_selBank), cur, dir);   // +/- další existující rejstřík
             pNum.OnTypedCommit = v => ToggleTypedRegister((int)Math.Round(v));               // "85 Enter" přepne rejstřík
+            pNum.OnStepCommit = v => StepRegister(_selBank, (int)Math.Round(v));             // krok70: +/- přepne rovnou, bez Enter
             _fRegNumber = _form.Add(pNum);
 
-            _fRegOn = _form.Add(Parameter.Toggle(
-                "Zap",
-                () => App.OrganEngine?.IsRegisterActive(new RegisterId(_selBank, _selNumber)) ?? false,
-                on =>
-                {
-                    var id = new RegisterId(_selBank, _selNumber);
-                    var engine = App.OrganEngine;
-                    if (engine == null || !TE.RegisterExists(id)) return;
-                    if (engine.IsRegisterActive(id) != on) engine.ToggleRegister(id);
-                }));
+            // ---- krok55: úplně stejná dvojice polí, ale nezávislá a jen pro bicí banku ----
+            var drmBanks = TE.Banks.Where(b => b == DrumBankNumber).ToList();
+            _selLiveDrmBank = drmBanks.Count > 0 ? drmBanks[0] : DrumBankNumber;
+            var drmNums = TE.NumbersInBank(_selLiveDrmBank);
+            _selLiveDrmNumber = drmNums.Count > 0 ? drmNums[0] : 0;
+
+            var pDrmBank = Parameter.Number(
+                "Banka", "", 0, 999, 0, new[] { 1.0, 1.0, 10.0 },
+                () => _selLiveDrmBank,
+                v => SelectDrmBank((int)Math.Round(v)),
+                zeroPad: 3);
+            pDrmBank.Stepper = (cur, dir) => StepInList(drmBanks, cur, dir);
+            _fLiveDrmBank = _form.Add(pDrmBank);
+
+            var pDrmNum = Parameter.Number(
+                "Rej", "", 0, 99999, 0, new[] { 1.0, 1.0, 10.0 },
+                () => _selLiveDrmNumber,
+                v => _selLiveDrmNumber = (int)Math.Round(v),
+                zeroPad: 3);
+            pDrmNum.Stepper = (cur, dir) => StepInList(TE.NumbersInBank(_selLiveDrmBank), cur, dir);
+            pDrmNum.OnTypedCommit = v => ToggleTypedDrmRegister((int)Math.Round(v));
+            pDrmNum.OnStepCommit = v => StepRegister(_selLiveDrmBank, (int)Math.Round(v));   // krok70: +/- přepne rovnou, bez Enter
+            _fLiveDrmNumber = _form.Add(pDrmNum);
         }
 
-        /// <summary>krok16: změna banky; když vybraný rejstřík v nové bance není, skočí se na její první.</summary>
-        private void SelectBank(int bank)
+        /// <summary>
+        /// krok16: jen aktualizuje ukazatel (vybraná banka/výchozí číslo rejstříku v ní) -
+        /// BEZ VEDLEJŠÍHO EFEKTU na živé hraní. Používá ToggleTypedRegister při skoku do
+        /// jiné banky (tam se o zapnutí rejstříku stará hned potom explicitně
+        /// ToggleMelodicRegister - měkké odeznění staré banky, viz tamní komentář).
+        /// </summary>
+        private void SetSelectedBankPointer(int bank)
         {
             _selBank = bank;
             var nums = TE.NumbersInBank(bank);
             if (nums.Count > 0 && !nums.Contains(_selNumber)) _selNumber = nums[0];
+        }
+
+        /// <summary>
+        /// krok16/66: změna melodické banky přes pole Banka (šipky i přímé zadání čísla).
+        /// Na rozdíl od zadání REJSTŘÍKU (Enter v poli Rej, viz ToggleTypedRegister) se
+        /// tohle chová jako tvrdé přepnutí kombinace na varhanách: stará banka se
+        /// OKAMŽITĚ umlčí BEZ DOZVUKU (u OPL3 by dozvuk napříč bankami navíc zněl
+        /// otřesně) a rovnou se zkusí zapnout STEJNÉ číslo rejstříku v nové bance, pokud
+        /// tam existuje - typicky tedy zůstane "klavír" klavírem, jen z jiné banky, beze
+        /// změny čísla v poli Rej. Když tam neexistuje, nová banka zůstane prostě tichá,
+        /// dokud se nezadá platné číslo.
+        /// </summary>
+        private void SelectBank(int bank)
+        {
+            SetSelectedBankPointer(bank);
+
+            var id = new RegisterId(_selBank, _selNumber);
+            RegisterId? newId = TE.RegisterExists(id) ? id : null;
+
+            App.OrganEngine?.HardSwitchMelodicBank(newId, DrumBankNumber);
+        }
+
+        /// <summary>krok55: totéž pro bicí banku (dnes jen jedna, ale jednou jich může být víc).</summary>
+        private void SelectDrmBank(int bank)
+        {
+            _selLiveDrmBank = bank;
+            var nums = TE.NumbersInBank(bank);
+            if (nums.Count > 0 && !nums.Contains(_selLiveDrmNumber)) _selLiveDrmNumber = nums[0];
         }
 
         /// <summary>krok16: další (dir=+1) nebo předchozí (dir=-1) hodnota ze seřazeného seznamu; na kraji zůstane.</summary>
@@ -1103,12 +1389,44 @@ namespace PS150.UI.Windows
                 bool found = false;
                 foreach (int b in TE.Banks)
                 {
-                    if (TE.RegisterExists(new RegisterId(b, number))) { SelectBank(b); _selNumber = number; found = true; break; }
+                    if (b == DrumBankNumber) continue;   // krok55: melodické pole nepřeskakuje do bicí banky
+                    // krok66: tady jen ukazatel (SetSelectedBankPointer), NE SelectBank -
+                    // o zapnutí se vzápětí postará ToggleMelodicRegister (měkké odeznění).
+                    if (TE.RegisterExists(new RegisterId(b, number))) { SetSelectedBankPointer(b); _selNumber = number; found = true; break; }
                 }
                 if (!found) return;
                 id = new RegisterId(_selBank, number);
             }
+            // krok60: tutti/kombinování víc rejstříků zůstává, ale jen v rámci JEDNÉ
+            // banky - přepnutím na jinou banku se ty předchozí (z jiné banky) samy
+            // vypnou, ať nehraje melodie zbytečně napříč Organ/SF2/OPL3 najednou.
+            // Bicí (DrumBankNumber) se tímhle vůbec neřeší - Bic: řádek dál funguje
+            // nezávisle (ToggleTypedDrmRegister).
+            App.OrganEngine?.ToggleMelodicRegister(id, DrumBankNumber);
+        }
+
+        /// <summary>krok55: obdoba ToggleTypedRegister, ale jen pro bicí banku/pole - nemá kam "přeskakovat",
+        /// bicích bank je zatím jen jedna.</summary>
+        private void ToggleTypedDrmRegister(int number)
+        {
+            var id = new RegisterId(_selLiveDrmBank, number);
+            if (!TE.RegisterExists(id)) return;
             App.OrganEngine?.ToggleRegister(id);
+        }
+
+        /// <summary>
+        /// krok70: +/- (i kolečko) na poli Rej - ať melodickém, ať bicím - přepne rejstřík
+        /// OKAMŽITĚ, bez čekání na Enter: stará banka/rejstřík se vypne a nový se rovnou
+        /// zapne (viz AudioEngine.StepRegisterInBank), takže jde rychle "proklikat" celou
+        /// banku jedním prstem. Na rozdíl od ToggleTypedRegister/ToggleTypedDrmRegister
+        /// (Enter po ručně vypsaném čísle) se tu NEkombinuje/netuttuje - vždycky hraje
+        /// nejvýš jeden rejstřík z právě prohledávané banky.
+        /// </summary>
+        private void StepRegister(int bank, int number)
+        {
+            var id = new RegisterId(bank, number);
+            if (!TE.RegisterExists(id)) return;
+            App.OrganEngine?.StepRegisterInBank(id);
         }
 
         /// <summary>ZMĚNA: Shift = hrubý krok, Ctrl = jemný, jinak normální (klávesy +/- i kolečko).</summary>
@@ -1250,10 +1568,8 @@ namespace PS150.UI.Windows
             _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
             _grid.WriteLine();
 
-            // ============ Řádek 2: VU metry L a P (u MIDI přehled) ============
+            // ============ Řádek 2: VU metry L a P (krok46: VŽDY, i u .mid souborů) ============
             _grid.SetCursorPosition(0, 2);
-
-            if (!_isMidiMode)
             {
                 const int meterWidth = 44;
 
@@ -1269,7 +1585,15 @@ namespace PS150.UI.Windows
                 _grid.ResetColor();
                 _grid.Write($"]{_rightDb,6:F1}dB");
             }
-            else
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
+
+            // ============ Řádek 3: "MIDI (engine), kanálů: N" (jen u .mid souborů) ============
+            // krok46: dřív byl tohle "else" větev řádku 2 (VU metry/MIDI info
+            // se vzájemně vylučovaly na jednom řádku) - teď má každý svůj
+            // vlastní řádek, ať je vidět obojí najednou.
+            _grid.SetCursorPosition(0, 3);
+            if (_isMidiMode)
             {
                 int channelCount;
                 lock (_midiNotesLock) { channelCount = _midiUsedChannels.Length; }
@@ -1278,11 +1602,10 @@ namespace PS150.UI.Windows
                 _grid.Write($" MIDI ({_midiPlayer.OutputDescription}), kanálů: {channelCount}");   // krok20: skutečný zdroj zvuku
                 _grid.ResetColor();
             }
-
             _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
             _grid.WriteLine();
 
-            // ============ Řádek 3: čas, textová pole (hlasitost, bicí, ladění, AJI), stav ============
+            // ============ Řádek 4: čas, textová pole (hlasitost, bicí, ladění, AJI), stav ============
             // Pole [ ] jsou ovladatelná myší (klik, kolečko), Tab, +/- a zadáním
             // čísla - viz FieldForm v Core. Každé pole se při vykreslení ohlásí
             // formuláři (Place), aby věděl, kam kliknout.
@@ -1291,7 +1614,7 @@ namespace PS150.UI.Windows
             string timeStr = $"{current:mm\\:ss}/{total:mm\\:ss}";
 
             _form.BeginFrame();
-            _grid.SetCursorPosition(0, 3);
+            _grid.SetCursorPosition(0, 4);
             _grid.ResetColor();
 
             void Segment(string text, ConsoleColor color)
@@ -1481,9 +1804,105 @@ namespace PS150.UI.Windows
             _grid.Write(suffix);
         }
 
+        // krok55: dřív jeden řádek navíc nad notovými osnovami, pořád vidět, jakmile bylo
+        // připojené MIDI-IN. Teď je to samostatný blok POD osnovami, oddělený dvěma
+        // prázdnými řádky, a vidět je jen když přehrávač STOJÍ (nehraje) - při poslechu by
+        // jinak splýval s osnovami a kradl místo. Klaviatuře/pedálům samým je to jedno,
+        // InputManager a ToneEngine běží pořád bez ohledu na to, co je vidět na obrazovce -
+        // na definitivním HW (bez přehrávače písniček) bude tenhle blok vidět furt.
+        private const int OrganBlankRows = 2;
+
+        // krok67: řádek s ladění pro živé hraní (T/A4) - vždycky přesně jeden řádek.
+        private const int LiveTuningRows = 1;
+
+        /// <summary>
+        /// krok67: ladění/transpozice pro ŽIVÉ hraní - vlastní řádek hned pod MIDI
+        /// vstupy a nad Mel:/Bic:, nezávislý na ladění přehrávače .mid (to je v
+        /// záhlaví, _fTranspose/_fA4). Platí jen pro ToneEngine (viz komentář u
+        /// ToneEngine.LiveTransposeSemitones) - banky OPL3/GM (8/2) se jím zatím
+        /// neřídí.
+        /// </summary>
+        private void RenderLiveTuningRow()
+        {
+            int row = _grid.CursorY;
+            _grid.ForegroundColor = ConsoleColor.Cyan;
+            _grid.Write(" Lad: ");
+            WriteFormField(row, _fLiveTranspose, "T", "  ");
+            WriteFormField(row, _fLiveA4, "A4 ", "Hz  ");
+            _grid.ResetColor();
+            _grid.WriteLine();
+        }
+
+        /// <summary>krok69: kolik řádků AJI pro živé hraní zrovna zabírá - druhý (parametry AutoDetect) jen když je zrovna zvolený ten režim.</summary>
+        private int LiveAjiRowCount() =>
+            (App.OrganEngine?.LiveAji.Mode ?? PS150.Core.ToneEngine.LiveAjiMode.Off) == PS150.Core.ToneEngine.LiveAjiMode.AutoDetect ? 2 : 1;
+
+        /// <summary>
+        /// krok69: AJI pro ŽIVÉ hraní - jeden řádek vždycky (mód, ladění, tónika,
+        /// dur/moll, aktuálně platná tónina), druhý (parametry AutoDetect - okno,
+        /// krok, práh, minimální počet kroků) jen když je zrovna zvolený režim
+        /// Auto (viz LiveAjiMode.AutoDetect) - u Pevné tóniny/Vypnuto by jen
+        /// zabíral místo bez užitku.
+        /// </summary>
+        private void RenderLiveAjiRows()
+        {
+            var liveAji = App.OrganEngine?.LiveAji;
+            var mode = liveAji?.Mode ?? PS150.Core.ToneEngine.LiveAjiMode.Off;
+
+            int row = _grid.CursorY;
+            _grid.ForegroundColor = ConsoleColor.Cyan;
+            _grid.Write(" AJI: ");
+            WriteFormField(row, _fLiveAjiMode, "Mod", "  ");
+            WriteNameTag(LiveAjiModeNames, (int)mode);
+
+            WriteFormField(row, _fLiveAjiTemperament, "Lad", "  ");
+            WriteNameTag(LiveAjiTemperamentNames, (int)(liveAji?.Temperament ?? PS150.Core.AjiTemperament.JustIntonation5Limit));
+
+            WriteFormField(row, _fLiveAjiTonic, "Ton", " ");
+            WriteNameTag(LiveAjiTonicNames, liveAji?.FixedTonicPc ?? 0);
+            _grid.Write(" ");
+            WriteFormField(row, _fLiveAjiMinor, "Moll", "  ");
+
+            if (mode != PS150.Core.ToneEngine.LiveAjiMode.Off)
+            {
+                string status = App.OrganEngine?.LiveAjiStatusText() ?? "";
+                if (!string.IsNullOrEmpty(status))
+                {
+                    _grid.ForegroundColor = ConsoleColor.Yellow;
+                    _grid.Write($"= {status}  ");
+                }
+            }
+
+            _grid.ResetColor();
+            _grid.WriteLine();
+
+            if (mode == PS150.Core.ToneEngine.LiveAjiMode.AutoDetect)
+            {
+                int row2 = _grid.CursorY;
+                _grid.ForegroundColor = ConsoleColor.Cyan;
+                _grid.Write("      ");
+                WriteFormField(row2, _fLiveAjiWindow, "Okno ", "s  ");
+                WriteFormField(row2, _fLiveAjiHop, "Krok ", "s  ");
+                WriteFormField(row2, _fLiveAjiMargin, "Prah ", "  ");
+                WriteFormField(row2, _fLiveAjiMinHops, "MinKr ", "  ");
+                _grid.ResetColor();
+                _grid.WriteLine();
+            }
+        }
+
+        /// <summary>krok69: krátký, šedě napsaný popisek hned za číselným polem (mód/ladění/tónika) - ať není vidět jen holé číslo.</summary>
+        private void WriteNameTag(string[] names, int index)
+        {
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(index >= 0 && index < names.Length ? names[index] : "?");
+            _grid.ResetColor();
+        }
+
         private void RenderStatusArea()
         {
-            bool showOrganPanel = App.Input?.IsLiveDeviceConnected ?? false;
+            bool midiConnected = App.Input?.IsLiveDeviceConnected ?? false;
+            bool isActuallyPlaying = _isMidiMode ? !_midiPlayer.IsPaused : _audioPlayer.IsPlaying;
+            bool showOrganPanel = midiConnected && !isActuallyPlaying;
 
             int[] usedChannels = Array.Empty<int>();
             (int Channel, int Note, double BendCents)[] activeNotesSnapshot = Array.Empty<(int, int, double)>();
@@ -1516,12 +1935,18 @@ namespace PS150.UI.Windows
             }
 
             // Čas, hlasitost, ladění, AJI a výstup jsou už v řádku 3 záhlaví
-            // (viz RenderDashboard, jsou to textová pole). Tady zbývá jen
-            // varhanní panel a MIDI osnovy.
-            // NOVÉ: formulář MIDI vstupů - jeden řádek na každé rozhraní (i odpojené, šedě).
-            MidiPortSnapshot[] midiPorts = App.Input?.GetPorts() ?? Array.Empty<MidiPortSnapshot>();
+            // (viz RenderDashboard, jsou to textová pole).
+            // krok55: formulář MIDI vstupů (jeden řádek na každé rozhraní, i odpojené, šedě)
+            // se počítá/kreslí jen když se vůbec ukazuje živý panel.
+            MidiPortSnapshot[] midiPorts = showOrganPanel ? (App.Input?.GetPorts() ?? Array.Empty<MidiPortSnapshot>()) : Array.Empty<MidiPortSnapshot>();
 
-            int totalRows = midiPorts.Length + (showOrganPanel ? 2 : 0) + staffRows;   // ZMĚNA: jen Reg a Akt, tři VU pásma (H/S/V) zrušena
+            // krok56: 2 prázdné řádky + MIDI vstupy + (Mel a Bic už nejsou nutně
+            // jen 1 řádek - za polem Rej je navíc seznam všech rejstříků dané
+            // banky, zalomený, takže se může rozlít na víc řádků - viz WrapRegisterNames).
+            int melLines = showOrganPanel ? WrapRegisterNames(_selBank, RegRowStartCol(" Mel: ", _fRegBank, _fRegNumber)).Count : 0;
+            int drmLines = showOrganPanel ? WrapRegisterNames(_selLiveDrmBank, RegRowStartCol(" Bic: ", _fLiveDrmBank, _fLiveDrmNumber)).Count : 0;
+            int organRows = showOrganPanel ? (OrganBlankRows + midiPorts.Length + LiveTuningRows + LiveAjiRowCount() + melLines + drmLines) : 0;
+            int totalRows = staffRows + organRows;
             if (EnsureRows(HeaderRows + totalRows))
             {
                 RenderDashboard();
@@ -1529,71 +1954,7 @@ namespace PS150.UI.Windows
 
             _grid.SetCursorPosition(0, HeaderRows);
 
-            RenderMidiPortRows(midiPorts);
-
-            if (showOrganPanel)
-            {
-                // krok16: řádek Reg: = pole Banka (jen když je víc bank), Rejstřík, zap/vyp a dlouhé jméno
-                bool multiBank = TE.Banks.Count > 1;
-                int regRow = _grid.CursorY;
-                _grid.ForegroundColor = ConsoleColor.Cyan;
-                _grid.Write(" Reg: ");
-                if (multiBank) WriteFormField(regRow, _fRegBank, "Banka ", "  ");
-                WriteFormField(regRow, _fRegNumber, "Rej ", "  ");
-                WriteFormField(regRow, _fRegOn, "", "  ");
-
-                var selId = new RegisterId(_selBank, _selNumber);
-                string? regName = TE.RegisterName(selId);
-                string nameText;
-                if (regName == null)
-                    nameText = BankTable.Find(_selBank) == null ? "(banka neexistuje)" : "(rejstřík v bance neexistuje)";
-                else
-                    nameText = $"{_selNumber:000} {regName}";
-                if (multiBank)
-                    nameText = $"{BankTable.Find(_selBank)?.FullName ?? _selBank.ToString("000")} · {nameText}";
-                _grid.ForegroundColor = regName == null ? ConsoleColor.DarkGray : ConsoleColor.White;
-
-                // krok17: běží-li načítání banky SF2, ukáže se místo jména průběh; případná chyba načítání červeně
-                string? loadStatus = PS150.Core.Sampler.Sf2Loader.StatusText;
-                string? loadError = PS150.Core.Sampler.Sf2Loader.LastError;
-                if (loadStatus != null)
-                {
-                    nameText = loadStatus;
-                    _grid.ForegroundColor = ConsoleColor.Yellow;
-                }
-                else if (loadError != null && regName == null)
-                {
-                    nameText = loadError;
-                    _grid.ForegroundColor = ConsoleColor.Red;
-                }
-
-                _grid.WriteLine(TextLayout.FitWidth(nameText, Math.Max(0, Cols - _grid.CursorX)));
-                _grid.ResetColor();
-
-                _grid.Write(" Akt: ");
-                var active = App.OrganEngine?.ActiveRegisters;
-                if (active != null && active.Count > 0)
-                {
-                    var ordered = active.OrderBy(r => r.Bank).ThenBy(r => r.Number).ToList();
-                    string Label(RegisterId r, bool withName)
-                    {
-                        string code = multiBank ? r.ToString() : r.Number.ToString("000");
-                        string? n = withName ? TE.RegisterName(r) : null;
-                        return n == null ? code : $"{code} {n}";
-                    }
-                    string text = string.Join(", ", ordered.Select(r => Label(r, true)));
-                    if (text.Length > Cols - 6)
-                        text = string.Join(", ", ordered.Select(r => Label(r, false)));   // dlouhá jména se nevejdou
-                    _grid.ForegroundColor = ConsoleColor.Green;
-                    _grid.WriteLine(TextLayout.FitWidth(text, Cols - 6));
-                    _grid.ResetColor();
-                }
-                else
-                {
-                    _grid.WriteLine(TextLayout.FitWidth("(žádný)", Cols - 6));
-                }
-            }
-
+            // ---- notové osnovy (jen u .mid, hned pod přehrávačem) ----
             if (_isMidiMode)
             {
                 if (errorMessage != null)
@@ -1655,6 +2016,103 @@ namespace PS150.UI.Windows
                     }
                 }
             }
+
+            // ---- krok55: živé hraní - jen když přehrávač stojí a je připojené MIDI-IN ----
+            if (showOrganPanel)
+            {
+                for (int i = 0; i < OrganBlankRows; i++) _grid.WriteLine();
+
+                RenderMidiPortRows(midiPorts);
+
+                RenderLiveTuningRow();
+                RenderLiveAjiRows();
+
+                RenderRegRow(" Mel: ", _fRegBank, _fRegNumber, _selBank);
+                RenderRegRow(" Bic: ", _fLiveDrmBank, _fLiveDrmNumber, _selLiveDrmBank);
+            }
+        }
+
+        /// <summary>
+        /// krok56: sloupec, na kterém končí pole Banka a Rej (a tedy kde začíná seznam
+        /// rejstříků za nimi) - čistě z šířek polí, BEZ kreslení. Potřeba předem, aby
+        /// šlo spočítat kolik řádků seznam zabere (viz RenderStatusArea), dřív než se
+        /// vůbec začne kreslit (EnsureRows musí znát výšku předem).
+        /// </summary>
+        private static int RegRowStartCol(string label, FormField bankField, FormField numberField)
+        {
+            return label.Length
+                + "Banka ".Length + FieldForm.FieldWidth(bankField.Parameter) + 2
+                + "Rej ".Length + FieldForm.FieldWidth(numberField.Parameter) + 2;
+        }
+
+        /// <summary>
+        /// krok56: jeden řádek "Banka/Rej + seznam všech rejstříků dané banky" - zápis
+        /// čísla do Rej a Enter rejstřík přepne (ToggleTypedRegister/Drm, beze změny),
+        /// a jestli je zapnutý se pozná podle zeleného podbarvení přímo v tomhle
+        /// seznamu - samostatné pole Zap i řádek "Akt:" tím padly, je to tak kratší.
+        /// </summary>
+        private void RenderRegRow(string label, FormField bankField, FormField numberField, int bank)
+        {
+            int regRow = _grid.CursorY;
+            _grid.ForegroundColor = ConsoleColor.Cyan;
+            _grid.Write(label);
+            WriteFormField(regRow, bankField, "Banka ", "  ");
+            WriteFormField(regRow, numberField, "Rej ", "  ");
+
+            foreach (var line in WrapRegisterNames(bank, _grid.CursorX))
+            {
+                foreach (var (text, active) in line)
+                {
+                    _grid.BackgroundColor = active ? ConsoleColor.DarkGreen : ConsoleColor.Black;
+                    _grid.ForegroundColor = active ? ConsoleColor.White : ConsoleColor.Gray;
+                    _grid.Write(text);
+                }
+                _grid.ResetColor();
+                _grid.WriteLine();
+            }
+        }
+
+        /// <summary>
+        /// krok56: jména všech rejstříků dané banky (TE.NumbersInBank/TE.RegisterName,
+        /// tedy přesně to, co je zapsané ve var ...Presets = new VoicePreset[] ... v
+        /// BuildRegistry()), oddělená mezerou a zalomená na šířku řádku (Cols). Vrací
+        /// řádky jako pole dvojic (text, je-aktivní) - text už obsahuje oddělující
+        /// mezeru před sebou, pokud na řádku není první. firstLineStartCol = sloupec,
+        /// kde na PRVNÍM řádku seznam začíná (hned za polem Rej); další řádky (pokud
+        /// se nevejde) začínají od levého kraje.
+        /// </summary>
+        private List<(string Text, bool Active)[]> WrapRegisterNames(int bank, int firstLineStartCol)
+        {
+            var lines = new List<(string, bool)[]>();
+            var current = new List<(string, bool)>();
+            int col = firstLineStartCol;
+            bool lineHasItem = false;
+
+            foreach (int number in TE.NumbersInBank(bank))
+            {
+                // krok57: číslo rejstříku natvrdo před jménem ("001 Grand Piano"), ať se
+                // dá vyčíst, co napsat do pole Rej, místo hádání/pokusu-omylu.
+                var id = new RegisterId(bank, number);
+                string name = $"{number:000} {TE.RegisterName(id) ?? "?"}";
+                bool active = App.OrganEngine?.IsRegisterActive(id) ?? false;
+
+                string piece = lineHasItem ? " " + name : name;
+                if (lineHasItem && col + piece.Length > Cols)
+                {
+                    lines.Add(current.ToArray());
+                    current = new List<(string, bool)>();
+                    col = 0;
+                    lineHasItem = false;
+                    piece = name;
+                }
+
+                current.Add((piece, active));
+                col += piece.Length;
+                lineHasItem = true;
+            }
+
+            lines.Add(current.ToArray());   // i prázdný poslední řádek, když banka nemá žádný rejstřík
+            return lines;
         }
 
     }

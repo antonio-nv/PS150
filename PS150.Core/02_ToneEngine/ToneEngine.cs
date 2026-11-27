@@ -39,6 +39,131 @@ namespace PS150.Core.ToneEngine
         // Zámek chránící sdílený stav před konfliktem MIDI vlákna a Audio vlákna
         private readonly object _lock = new object();
 
+        // krok67: ladění/transpozice pro ŽIVÉ hraní - nezávislé na ladění přehrávače
+        // .mid (to je PlayerTuning/GmPianoMidiPlayer, řeší se tam pitch bendem na
+        // úrovni MIDI eventů). Tohle ovlivňuje přímo frekvenci počítanou v NoteOn
+        // níž, týká se tedy jen rejstříků hrajících přes ToneEngine (Organ/SF2/
+        // Synth/KORG/Amiga...) - banky s vlastním živým enginem MIMO ToneEngine
+        // (OPL3 banka 8, GM banka 2 - viz AudioEngine/App.xaml.cs) se tímhle zatím
+        // neřídí, ty mají svoje vlastní MIDI směrování beze změny.
+        //
+        // krok68: klavír nemá kolečko pitch bend, ale "glissando" efekt z
+        // přehrávače .mid (plynulá změna výšky už znějícího tónu při jemném
+        // posunu T/A4) jde odsimulovat i tady - GenerateNextSample čte
+        // ActiveNote.Frequency v KAŽDÉM vzorku, takže stačí při změně T/A4
+        // přepočítat kmitočet VŠECH právě podržených not za chodu (viz
+        // RetuneActiveNotes níž) - stejný výsledek, jiná cesta (přímý přepočet
+        // kmitočtu místo MIDI pitch bendu).
+        private double _liveTransposeSemitones = 0.0;
+        public double LiveTransposeSemitones
+        {
+            get => _liveTransposeSemitones;
+            set { _liveTransposeSemitones = value; RetuneActiveNotes(); }
+        }
+
+        private double _liveReferenceA4Hz = 440.0;
+        public double LiveReferenceA4Hz
+        {
+            get => _liveReferenceA4Hz;
+            set { _liveReferenceA4Hz = value; RetuneActiveNotes(); }
+        }
+
+        // krok69: AJI pro ŽIVÉ hraní (viz PS150.Core/02_ToneEngine/LiveAji.cs) -
+        // natvrdo zadaná tónina NEBO průběžná detekce z klouzavého okna. Na
+        // rozdíl od LiveTransposeSemitones/LiveReferenceA4Hz je tohle mutovatelná
+        // POCO (moc nastavení na to, aby mělo každé pole svůj vlastní "set
+        // spouští přepočet" - po úpravě čehokoliv v ní zavolej RetuneActiveNotes()
+        // ručně, viz AudioEngine.ApplyLiveAji).
+        public readonly LiveAjiSettings LiveAji = new LiveAjiSettings();
+
+        private readonly LiveKeyDetector _liveKeyDetector = new LiveKeyDetector();
+        private readonly System.Diagnostics.Stopwatch _liveClock = System.Diagnostics.Stopwatch.StartNew();
+
+        /// <summary>krok69: zahodí vše, co AutoDetect ví o dosavadním hraní - volá se při zapnutí/vypnutí AutoDetect nebo změně jeho parametrů.</summary>
+        public void ResetLiveAjiDetector() => _liveKeyDetector.Reset();
+
+        /// <summary>
+        /// krok69: text pro obrazovku - u FixedKey rovnou zadaná tónina, u
+        /// AutoDetect aktuální odhad (nebo "zatím ?", dokud nehrálo dost not).
+        /// Prázdný řetězec, když je AJI vypnuté.
+        /// </summary>
+        public string LiveAjiStatusText()
+        {
+            switch (LiveAji.Mode)
+            {
+                case LiveAjiMode.FixedKey:
+                    return new PS150.Core.AjiKeySection(0.0, LiveAji.FixedTonicPc, LiveAji.FixedIsMinor).Name;
+                case LiveAjiMode.AutoDetect:
+                    return _liveKeyDetector.HasKey
+                        ? new PS150.Core.AjiKeySection(0.0, _liveKeyDetector.TonicPc, _liveKeyDetector.IsMinor).Name
+                        : "zatím ?";
+                default:
+                    return "";
+            }
+        }
+
+        /// <summary>
+        /// krok69: odchylka v centech od rovnoměrné temperatury pro danou notu -
+        /// buď z AJI (FixedKey/AutoDetect, pokud už máme tóninu), nebo (AJI vypnuté
+        /// nebo AutoDetect ještě nic neví) z vlastní temperatury rejstříku jako
+        /// dřív (preset.Temperament.CentOffset).
+        /// </summary>
+        private double GetLiveCentOffset(VoicePreset preset, int noteNumber)
+        {
+            int rootPc;
+            switch (LiveAji.Mode)
+            {
+                case LiveAjiMode.FixedKey:
+                    rootPc = LiveAjiSettings.RelativeMajorRoot(LiveAji.FixedTonicPc, LiveAji.FixedIsMinor);
+                    break;
+                case LiveAjiMode.AutoDetect when _liveKeyDetector.HasKey:
+                    rootPc = LiveAjiSettings.RelativeMajorRoot(_liveKeyDetector.TonicPc, _liveKeyDetector.IsMinor);
+                    break;
+                default:
+                    return preset.Temperament.CentOffset(noteNumber);
+            }
+
+            int interval = ((noteNumber % 12) - rootPc + 12) % 12;
+            return PS150.Core.AjiPlanner.OffsetCents(LiveAji.Temperament, interval);
+        }
+
+        /// <summary>
+        /// krok67/69: kmitočet jedné melodické noty s aktuálním živým laděním
+        /// (transpozice, A4, a buď AJI, nebo vlastní temperatura rejstříku) -
+        /// společné pro NoteOn (nový úhoz) i RetuneActiveNotes (přepočet za
+        /// chodu, "glissando" - viz krok68).
+        /// </summary>
+        private double ComputeLiveFrequency(VoicePreset preset, int noteNumber)
+        {
+            double tunedNote = noteNumber + LiveTransposeSemitones;
+            double centOffset = GetLiveCentOffset(preset, noteNumber);
+            return LiveReferenceA4Hz * Math.Pow(2.0, (tunedNote - 69) / 12.0)
+                 * Math.Pow(2.0, centOffset / 1200.0);
+        }
+
+        /// <summary>krok69: ToneEngine má svoje vlastní plynoucí hodiny pro LiveKeyDetector (nezávislé na CurrentTime přehrávače .mid).</summary>
+        private double LiveClockSeconds() => _liveClock.Elapsed.TotalSeconds;
+
+        /// <summary>
+        /// krok68/69: přepočítá kmitočet všech právě znějících (nebicích) not podle
+        /// AKTUÁLNÍHO živého ladění (transpozice/A4/AJI) - stejný vzorec jako
+        /// v NoteOn (viz ComputeLiveFrequency). Bicí rejstřík (DrumRegister) se
+        /// vynechává - transpozice/AJI by tam jen posunuly, který buben zní.
+        /// </summary>
+        public void RetuneActiveNotes()
+        {
+            lock (_lock)
+            {
+                foreach (var note in _activeNotes)
+                {
+                    if (note.Register == DrumRegister) continue;
+                    if (!_presetRegistry.TryGetValue(note.Register, out var preset)) continue;
+
+                    note.Frequency = ComputeLiveFrequency(preset, note.NoteNumber);
+                }
+            }
+        }
+
         // Základní zesílení výstupu. Žádné tvarování signálu (tanh apod.) záměrně
         // nepoužíváme - pro spektrální analýzu potřebujeme signál beze zkreslení.
         private const double MasterGain = 0.3;
@@ -189,6 +314,59 @@ namespace PS150.Core.ToneEngine
             return count;
         }
 
+        /// <summary>
+        /// krok58: obdoba RegisterSf2Bank, ale pro OPL3/GENMIDI.op2 (banka 8) - zapíše
+        /// jen MELODICKÉ nástroje (128, číslováno 1-128 podle GM programu), bicí mapu
+        /// (Op2Bank.Percussion) neregistruje (bicí na OPL3 se dnes nevybírají jako
+        /// rejstřík, viz komentář u DrmR v GmPianoMidiPlayer). Presety dostanou
+        /// InstrumentType.External - ŽÁDNÝ skutečný zvuk odsud nejde (viz SilentVoice),
+        /// ten hraje samostatný živý OplMidiSynth (viz AudioEngine.AttachLiveOpl);
+        /// tohle slouží jen k tomu, aby rejstřík šel zobrazit/zapnout/vypnout stejně
+        /// jako kterýkoliv jiný (formulář Mel:/Bic: o tom nemusí vědět nic navíc).
+        /// </summary>
+        public static int RegisterOp2Bank(int bankNumber, Op2Bank bank)
+        {
+            int count = 0;
+            for (int i = 0; i < bank.Melodic.Length; i++)
+            {
+                int number = i + 1;   // GM program 1-128, stejná konvence jako v Rej
+                var preset = new VoicePreset
+                {
+                    Name = bank.Melodic[i].Name,
+                    Number = number,
+                    Instrument = InstrumentType.External
+                };
+                if (_presetRegistry.TryAdd(new RegisterId(bankNumber, number), preset)) count++;
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// krok61: obdoba RegisterOp2Bank, ale pro banku 2 (GsWavetableOut/Windows
+        /// "Microsoft GS Wavetable Synth"). Na rozdíl od OPL3 tahle banka vůbec
+        /// neprozradí svoje nástroje (je to jen průchod na Windows), takže jména
+        /// berem z GeneralMidiNames - žádné tajemství, standardní seznam MMA (viz
+        /// komentář tam). Presety dostanou InstrumentType.External (viz
+        /// SilentVoice) - skutečný zvuk jde přímo na Windows zařízení, mimo
+        /// ToneEngine (viz AudioEngine.RegisterExclusiveBank).
+        /// </summary>
+        public static int RegisterGeneralMidiBank(int bankNumber)
+        {
+            int count = 0;
+            for (int i = 0; i < GeneralMidiNames.Melodic.Length; i++)
+            {
+                int number = i + 1;   // GM program 1-128, stejná konvence jako v Rej
+                var preset = new VoicePreset
+                {
+                    Name = GeneralMidiNames.Melodic[i],
+                    Number = number,
+                    Instrument = InstrumentType.External
+                };
+                if (_presetRegistry.TryAdd(new RegisterId(bankNumber, number), preset)) count++;
+            }
+            return count;
+        }
+
         // krok16: dotazy na registr pro formulář (banky, čísla rejstříků v bance, jméno rejstříku).
 
         /// <summary>Čísla bank, které mají aspoň jeden rejstřík (vzestupně). Později se omezí nastavením povolených bank.</summary>
@@ -198,6 +376,32 @@ namespace PS150.Core.ToneEngine
         /// <summary>Čísla rejstříků v dané bance (vzestupně).</summary>
         public static IReadOnlyList<int> NumbersInBank(int bank) =>
             _presetRegistry.Keys.Where(k => k.Bank == bank).Select(k => k.Number).OrderBy(n => n).ToList();
+
+        /// <summary>
+        /// krok45: najde skutečně definovaný rejstřík v dané bance pro zadané
+        /// číslo - když zadané číslo přesně neexistuje (prázdné místo v
+        /// číslování, např. 150 mezi 108 a 200 - viz BuildRegistry), vrátí
+        /// nejbližší NIŽŠÍ definované číslo (ten "poslední možný" před
+        /// zadaným), ne zadané číslo samo. Když banka nemá žádný rejstřík
+        /// nižší nebo rovný zadanému, vrátí aspoň nejnižší, co v bance je.
+        /// Null jen když banka nemá vůbec žádný rejstřík.
+        /// </summary>
+        public static int? NearestDefinedRegisterNumber(int bank, int requested)
+        {
+            if (_presetRegistry.ContainsKey(new RegisterId(bank, requested)))
+                return requested;
+
+            var numbers = NumbersInBank(bank);   // vzestupně
+            if (numbers.Count == 0) return null;
+
+            int? best = null;
+            foreach (var n in numbers)
+            {
+                if (n <= requested) best = n;
+                else break;
+            }
+            return best ?? numbers[0];
+        }
 
         /// <summary>Jméno rejstříku nebo null, když v registru není.</summary>
         public static string? RegisterName(RegisterId id) =>
@@ -255,6 +459,25 @@ namespace PS150.Core.ToneEngine
                 {
                     _activeRegisters.Add(number);
                     return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// krok66: na rozdíl od ToggleRegister (rejstřík zhasne, ale rozeznělé tóny
+        /// nechá doznít přirozeným Release - viz komentář výš) tohle OKAMŽITĚ
+        /// odstraní všechny znějící tóny daného rejstříku, BEZ dozvuku - příští
+        /// vzorek už z nich nic negeneruje. Pro tvrdé přepnutí melodické banky
+        /// (viz AudioEngine.HardSwitchMelodicBank).
+        /// </summary>
+        public void KillRegister(RegisterId number)
+        {
+            lock (_lock)
+            {
+                _activeRegisters.Remove(number);
+                for (int i = _activeNotes.Count - 1; i >= 0; i--)
+                {
+                    if (_activeNotes[i].Register == number) _activeNotes.RemoveAt(i);
                 }
             }
         }
@@ -335,6 +558,15 @@ namespace PS150.Core.ToneEngine
                 else
                     registers = _activeRegisters.ToArray();
 
+                // krok69: detektor se krmí JEDNOU za fyzický úhoz, ne jednou za
+                // aktivní rejstřík - jinak by při tutti (víc rejstříků najednou)
+                // ta samá nota navyšovala histogram tolikrát, kolik rejstříků zrovna
+                // hraje. Bicí kanál se sem vůbec neposílá (viz AjiPlanner.PercussionChannel).
+                if (!drumChannel && LiveAji.Mode == LiveAjiMode.AutoDetect)
+                {
+                    _liveKeyDetector.NoteOn(noteNumber, LiveClockSeconds(), LiveAji);
+                }
+
                 foreach (var registerNumber in registers)
                 {
                     if (!_presetRegistry.TryGetValue(registerNumber, out var preset))
@@ -346,9 +578,14 @@ namespace PS150.Core.ToneEngine
                         continue;
 
                     // Kmitočet se počítá zvlášť pro každý rejstřík podle jeho vlastní
-                    // temperatury (preset.Temperament).
-                    double freq = 440.0 * Math.Pow(2.0, (noteNumber - 69) / 12.0)
-                                * Math.Pow(2.0, preset.Temperament.CentOffset(noteNumber) / 1200.0);
+                    // temperatury (preset.Temperament), nebo podle AJI (krok69) -
+                    // viz ComputeLiveFrequency. krok67: ŽIVÉ ladění/transpozice se
+                    // týká jen melodických kanálů - bicí rejstřík vybírá KONKRÉTNÍ
+                    // buben podle čísla noty, transpozice by tam jen posunula, který
+                    // buben zazní, ne jeho výšku.
+                    double freq = drumChannel
+                        ? 440.0 * Math.Pow(2.0, (noteNumber - 69) / 12.0)
+                        : ComputeLiveFrequency(preset, noteNumber);
 
                     double gain = VelocityGain(preset.Instrument, velocity);
 
@@ -488,6 +725,11 @@ namespace PS150.Core.ToneEngine
                     // notu hrát (číslo noty = výběr zvuku, ne výška) - viz
                     // DrumVoice.cs a komentář u DrumParameter.
                     return new DrumVoice(preset, noteNumber, sampleRate);
+                case InstrumentType.External:
+                    // krok58/61: skutečný zvuk hraje mimo ToneEngine (živý
+                    // OplMidiSynth / Windows GS Wavetable) - tenhle hlas jen
+                    // bezhlučně drží místo, viz SilentVoice.cs.
+                    return new SilentVoice(sampleRate);
                 case InstrumentType.Organ:
                 default:
                     // krok23: noteNumber se předává kvůli AmplitudeEnvelope (interpolace síly alikvot podle hrané noty).

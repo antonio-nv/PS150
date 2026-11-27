@@ -186,17 +186,41 @@ namespace PS150.UI.Windows
         /// krok44: u syntetické banky (_001_SyntetickeZvuky) tahle hodnota NEZNAMENÁ
         /// GM program 0-127, ale PŘÍMO číslo rejstříku z ToneEngine (200, 300,
         /// 600...) - viz ISupportsSyntheticRegister/SyntheticMidiSynth.
+        /// krok45: u syntetiky se zadané číslo napřed "přichytí" na nejbližší
+        /// SKUTEČNĚ definovaný rejstřík (viz ToneEngine.NearestDefinedRegisterNumber)
+        /// - jinak by v poli klidně zůstalo třeba 150, které v BuildRegistry()
+        /// vůbec neexistuje (mezi 108 a 200), a nic by se neznělo. Vrací
+        /// efektivně použité číslo, ať ho volající (UniR pole) může zobrazit
+        /// místo toho, co se doopravdy zadalo.
         /// </summary>
-        public void SetMidiMelodicRegister(int gmProgram)
+        public int SetMidiMelodicRegister(int gmProgram)
         {
-            _melodicRegister = gmProgram;
+            bool tonalIsSynthetic = _playbackBankNumber == PS150.Core.Banks._001_SyntetickeZvuky.Number;
 
-            // krok34/44: ZAŽIVA přepne i právě hrající soubor, pokud to aktuální
+            int effective = gmProgram;
+            if (tonalIsSynthetic && gmProgram > 0)
+            {
+                effective = PS150.Core.ToneEngine.ToneEngine.NearestDefinedRegisterNumber(_playbackBankNumber, gmProgram)
+                    ?? gmProgram;
+            }
+
+            _melodicRegister = effective;
+
+            // krok34/44/45: ZAŽIVA přepne i právě hrající soubor, pokud to aktuální
             // engine umí (Sf2MidiSynth nebo SyntheticMidiSynth přes DualEngineMidiOut)
             // - bez přerušení přehrávání. GS Wavetable záloha to neumí, tam se jen
             // uloží hodnota pro příští PlayAsync (viz _melodicRegister výš).
-            if (_outputDevice is ISupportsMelodicRegister supported) supported.SetUniversalProgram(gmProgram);
-            else if (_outputDevice is ISupportsSyntheticRegister syntheticSupported) syntheticSupported.SetSyntheticRegister(gmProgram);
+            // krok45: DualEngineMidiOut implementuje OBĚ rozhraní VŽDY (ať je
+            // tónový subengine jakýkoliv) a jen tiše no-opne to, co subengine
+            // neumí - proto se tu rozhoduje podle _playbackBankNumber (co
+            // doopravdy hraje), ne podle "is ISupportsMelodicRegister", které by
+            // bylo pravda pořád a syntetiku by to nikdy nedostalo ke slovu.
+            if (tonalIsSynthetic)
+                (_outputDevice as ISupportsSyntheticRegister)?.SetSyntheticRegister(effective);
+            else
+                (_outputDevice as ISupportsMelodicRegister)?.SetUniversalProgram(effective);
+
+            return effective;
         }
 
         /// <summary>krok37: totéž, ale pro bicí sadu (kit), viz komentář u _drumRegister výš. Projeví se od příštího PlayAsync.</summary>
@@ -594,6 +618,20 @@ namespace PS150.UI.Windows
         /// křížky, když skladba je zjevně v béčkové tónině.
         /// </summary>
         public bool KeyPrefersFlats { get; private set; }
+
+        /// <summary>
+        /// krok46: VU metr pro .mid přehrávání - průchoz na aktuální
+        /// _outputDevice (Sf2MidiSynth/OplMidiSynth/SyntheticMidiSynth přes
+        /// DualEngineMidiOut, viz IProvidesAudioMeter). Záložní Windows
+        /// syntezátor (GsWavetableOut) tohle neumí - vrátí tiše (0,0)/false,
+        /// stejně jako dřív nebylo co měřit.
+        /// </summary>
+        public (float left, float right) ReadPeakLevels() =>
+            (_outputDevice as PS150.Core.Sampler.IProvidesAudioMeter)?.ReadPeakLevels() ?? (0f, 0f);
+
+        /// <summary>krok46: viz ReadPeakLevels výš.</summary>
+        public bool ClipDetected => (_outputDevice as PS150.Core.Sampler.IProvidesAudioMeter)?.ClipDetected ?? false;
+
         private const int PanLeft = 0;
         private const int PanCenter = 64;
         private const int PanRight = 127;
@@ -612,14 +650,19 @@ namespace PS150.UI.Windows
         /// <summary>krok20: popis aktuálního zdroje zvuku pro obrazovku (zůstává i po doznění skladby).</summary>
         public string OutputDescription { get; private set; } = "MIDI";
 
-        /// <summary>krok18: obal Windows syntezátoru jako IMidiOut (záloha, dokud se banka nenačte).</summary>
+        /// <summary>
+        /// krok18: obal Windows syntezátoru jako IMidiOut (záloha, dokud se banka nenačte).
+        /// krok64: eventy jdou přes SharedGmOutput (JEDNO sdílené spojení pro
+        /// celou appku, viz tamní komentář - dřív si tenhle přehrávač otvíral
+        /// vlastní OutputDevice, což při souběhu s živým hraním na bance 002
+        /// shazovalo appku). Dispose() je proto záměrně prázdný - sdílené
+        /// zařízení nepatří jen tomuhle přehrávání, nezavírá se.
+        /// </summary>
         private sealed class GsWavetableOut : IMidiOut
         {
-            private readonly OutputDevice _device;
-            public GsWavetableOut(OutputDevice device) { _device = device; }
             public string Description => "Microsoft GS Wavetable Synth (záloha)";
-            public void SendEvent(MidiEvent midiEvent) => _device.SendEvent(midiEvent);
-            public void Dispose() => _device.Dispose();
+            public void SendEvent(MidiEvent midiEvent) => SharedGmOutput.SendEvent(midiEvent);
+            public void Dispose() { }
         }
         private CancellationTokenSource? _cts;
         private Task? _playbackTask;
@@ -727,13 +770,15 @@ namespace PS150.UI.Windows
                 // ... a když ani jedna banka ještě není načtená, záloha: Windows syntezátor jako dřív.
                 if (_outputDevice == null)
                 {
-                    var gs = OutputDevice.GetByName(DeviceName);
+                    // krok64: SharedGmOutput místo vlastního OutputDevice.GetByName - viz
+                    // komentář u GsWavetableOut/SharedGmOutput.
+                    var gs = SharedGmOutput.TryGet();
                     if (gs == null)
                     {
                         throw new InvalidOperationException(
                             $"Výstupní zařízení '{DeviceName}' nebylo na tomto PC nalezeno.");
                     }
-                    _outputDevice = new GsWavetableOut(gs);
+                    _outputDevice = new GsWavetableOut();
                 }
 
                 // krok43: když došlo na zálohu KVŮLI výjimce (ne kvůli běžnému
@@ -751,9 +796,32 @@ namespace PS150.UI.Windows
                 // by jinak celý soubor odmítl s chybou "128 is invalid value ...";
                 // SnapToLimits hodnotu oseká na nejbližší platnou (127), jak to dělají
                 // jiné přehrávače.
+                //
+                // krok51: NotEnoughBytesPolicy.Ignore - některé staré herní .mid
+                // soubory (typicky komunitní balíčky typu TeamTNT Musicarus pro
+                // DOOM) mají za posledním platným MTrk blokem přilepený kus
+                // náhodného balastu navíc (zbytek po extrakci/balení, ne poškozená
+                // hudba - samotných deklarovaných 10/N stop bývá úplně v pořádku
+                // a správně ukončených). DryWetMidi se po dočtení poslední stopy
+                // snaží zkontrolovat, jestli nenásleduje ještě další blok, narazí
+                // na ten balast, vyjde mu nesmyslně obří "deklarovaná délka" a
+                // skončí chybou "doesn't have enough bytes". Ignore takový
+                // přebytečný ocas na konci souboru tiše přeskočí a zbytek (celou
+                // skutečnou hudbu) přečte normálně.
+                //
+                // krok52: InvalidChunkSizePolicy.Ignore - samostatná, NEZÁVISLÁ
+                // kontrola od NotEnoughBytesPolicy výš. I když se podaří ten
+                // balastní "chunk" nějak dočíst (zbylo na něj dost bajtů), engine
+                // navíc porovná, kolik bajtů opravdu přečetl, s tím, co bylo
+                // deklarováno v hlavičce - a když to nesedí (u našeho balastu
+                // nesedí skoro jistě), skončí druhou, samostatnou chybou
+                // "Actual size (...) differs from the one declared...". Ignore
+                // tenhle nesoulad taky jen tiše přejde.
                 midiFile = MidiFile.Read(filePath, new ReadingSettings
                 {
-                    InvalidChannelEventParameterValuePolicy = InvalidChannelEventParameterValuePolicy.SnapToLimits
+                    InvalidChannelEventParameterValuePolicy = InvalidChannelEventParameterValuePolicy.SnapToLimits,
+                    NotEnoughBytesPolicy = NotEnoughBytesPolicy.Ignore,
+                    InvalidChunkSizePolicy = InvalidChunkSizePolicy.Ignore
                 });
 
                 // Celková délka - spočítaná přesně z dat souboru (viz komentář
@@ -808,9 +876,19 @@ namespace PS150.UI.Windows
             // (0-127) a navíc by ho SyntheticMidiSynth stejně ignoroval (Program
             // Change se u něj nesleduje). Místo toho jde rovnou přes
             // ISupportsSyntheticRegister.
-            if (_melodicRegister != 0 && _outputDevice is ISupportsSyntheticRegister syntheticSupported)
+            // krok45: rozhoduje se podle _playbackBankNumber, NE podle
+            // "_outputDevice is ISupportsSyntheticRegister" - DualEngineMidiOut
+            // tohle rozhraní implementuje VŽDY (jen tiše no-opne, co tónový
+            // subengine neumí), takže by ta podmínka byla pravda i pro SF2/OPL
+            // a GM vynucování programu by se přestalo posílat úplně.
+            bool tonalIsSynthetic = _playbackBankNumber == PS150.Core.Banks._001_SyntetickeZvuky.Number;
+            if (_melodicRegister != 0 && tonalIsSynthetic)
             {
-                syntheticSupported.SetSyntheticRegister(_melodicRegister);
+                // krok45: i tady se číslo přichytí na nejbližší skutečně
+                // definovaný rejstřík - viz komentář u SetMidiMelodicRegister.
+                int snapped = PS150.Core.ToneEngine.ToneEngine.NearestDefinedRegisterNumber(_playbackBankNumber, _melodicRegister)
+                    ?? _melodicRegister;
+                (_outputDevice as ISupportsSyntheticRegister)?.SetSyntheticRegister(snapped);
             }
             else if (_melodicRegister != 0)
             {

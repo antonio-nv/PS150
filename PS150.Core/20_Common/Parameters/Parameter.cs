@@ -55,6 +55,14 @@ namespace PS150.Core.Parameters
         /// <summary>krok16: zavolá se po potvrzení ručně zadaného čísla klávesou Enter (ne při +/- ani kolečku).</summary>
         public Action<double>? OnTypedCommit { get; set; }
 
+        /// <summary>
+        /// krok70: zavolá se po KAŽDÉM kroku hodnoty (klávesy +/-, kolečko, Ctrl+PgUp/PgDn) -
+        /// na rozdíl od OnTypedCommit (jen Enter po ručně vypsaném čísle) sem patří akce,
+        /// které se mají spustit hned při krokování, bez čekání na potvrzení. Používá pole
+        /// Rej (FileBrowserWindow) pro rychlé "proklikání" celé banky rejstříků.
+        /// </summary>
+        public Action<double>? OnStepCommit { get; set; }
+
         private readonly Func<double> _get;
         private readonly Action<double> _set;
 
@@ -204,12 +212,14 @@ namespace PS150.Core.Parameters
                 int count = (stepIndex == 2 ? 10 : 1) * Math.Max(1, multiplier);
                 for (int i = 0; i < count; i++) v = Stepper(v, Math.Sign(direction));
                 SetValue(v);
+                OnStepCommit?.Invoke(Value);   // krok70
                 return;
             }
 
             double step = Steps[Math.Clamp(stepIndex, 0, Steps.Length - 1)];
             double next = Value + Math.Sign(direction) * step * Math.Max(1, multiplier);
             SetValue(next);
+            OnStepCommit?.Invoke(Value);   // krok70
         }
     }
 }

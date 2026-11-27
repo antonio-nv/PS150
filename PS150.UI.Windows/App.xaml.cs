@@ -3,6 +3,9 @@ using PS150.Core.Generators;
 using PS150.Core.Input;      // Pro InputManager
 using PS150.Core.Output;
 using PS150.Core.ToneEngine; // TONEENGINE
+using Melanchall.DryWetMidi.Core;         // krok58: NoteOnEvent/NoteOffEvent pro živé OPL3/GM
+using Melanchall.DryWetMidi.Common;       // krok58: SevenBitNumber/FourBitNumber
+using Melanchall.DryWetMidi.Multimedia;   // krok61: OutputDevice pro živou banku 2 (Windows GM)
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -75,15 +78,76 @@ namespace PS150.UI.Windows
         private InputManager? _inputManager;
         private ToneEngine? _toneEngine;
         private AudioEngine? _audioEngine;
+        private PS150.Core.Sampler.OplMidiSynth? _liveOpl;   // krok58: banka 8 pro živé hraní
+        private OutputDevice? _liveGm;                       // krok61/64: banka 2 pro živé hraní, viz SharedGmOutput
 
         // Statická reference, aby k aktuálnímu AudioEngine (varhany) mohly
         // přistoupit i jiné statické třídy jako VgaEngine (pro VU metr).
         public static AudioEngine? OrganEngine { get; private set; }
         public static InputManager? Input { get; private set; }
 
+        // krok58: stejná natvrdo odvozená cesta jako u přehrávače .mid (viz
+        // GmPianoMidiPlayer.OplGenMidiPath) - vedle PS150.exe, OP2\GENMIDI.op2.
+        private static readonly string OplGenMidiPath =
+            System.IO.Path.Combine(AppContext.BaseDirectory, "OP2", "GENMIDI.op2");
+
+        // krok63: "crash.log" vedle PS150.exe - viz InstallCrashLogger() níž.
+        private static readonly string CrashLogPath =
+            System.IO.Path.Combine(AppContext.BaseDirectory, "crash.log");
+
+        /// <summary>
+        /// krok63: globální zachytávání NEZACHYCENÝCH výjimek - na rozdíl od
+        /// Visual Studia s připojeným debuggerem tohle funguje stejně
+        /// v Release i Debug a nevyžaduje nic dalšího nastavovat. Hlavní
+        /// důvod: pád appky při živém hraní (např. přepnutí rejstříku) nejspíš
+        /// nastává na vlákně MIDI vstupu/zvukového callbacku, ne na UI vlákně
+        /// - takové výjimky WPF samo o sobě nikam nezapíše, celá appka prostě
+        /// zmizí. Tenhle zápis se stihne provést těsně PŘED tím, než běhové
+        /// prostředí appku kvůli nezachycené výjimce ukončí (AppDomain.
+        /// UnhandledException se volá synchronně, ještě než IsTerminating
+        /// proběhne).
+        /// </summary>
+        private static void InstallCrashLogger()
+        {
+            AppDomain.CurrentDomain.UnhandledException += (s, ex) =>
+                LogCrash("AppDomain.UnhandledException (nejspíš vlákno MIDI/zvuku)",
+                    ex.ExceptionObject as Exception, ex.IsTerminating);
+
+            // UI vlákno (kdyby pád přišel odsud) - necháváme ho dál spadnout
+            // (ex.Handled zůstává false), jen navíc zalogujeme příčinu.
+            Current.DispatcherUnhandledException += (s, ex) =>
+                LogCrash("Application.DispatcherUnhandledException (UI vlákno)", ex.Exception, isTerminating: true);
+
+            System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, ex) =>
+            {
+                LogCrash("TaskScheduler.UnobservedTaskException", ex.Exception, isTerminating: false);
+                ex.SetObserved();
+            };
+        }
+
+        private static void LogCrash(string source, Exception? ex, bool isTerminating)
+        {
+            try
+            {
+                string text =
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source} (terminating={isTerminating}){Environment.NewLine}" +
+                    (ex?.ToString() ?? "(ExceptionObject není Exception - viz source výš)") +
+                    Environment.NewLine + new string('-', 80) + Environment.NewLine;
+                File.AppendAllText(CrashLogPath, text);
+            }
+            catch
+            {
+                // I samotné logování může selhat (např. nezapisovatelná složka) -
+                // tady už nic nenaděláme, hlavně ať logování samo nezpůsobí další pád.
+            }
+        }
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            // krok63: musí běžet jako úplně první věc - ať zachytí i cokoliv,
+            // co by se pokazilo hned při startu.
+            InstallCrashLogger();
+
             // NOVÉ: diagnostika SoundFontu - PS150.exe --sf2info "banka.sf2" zapíše přehled
             // vedle banky (banka.sf2.info.txt a banka.sf2.info_detail.txt) a skončí.
             if (e.Args.Length >= 2 && string.Equals(e.Args[0], "--sf2info", StringComparison.OrdinalIgnoreCase))
@@ -123,6 +187,69 @@ namespace PS150.UI.Windows
 
             OrganEngine = _audioEngine;
 
+            // krok58: banka 8 (OPL3/SoundBlaster) pro ŽIVÉ hraní - vlastní instance
+            // OplMidiSynth BEZ vlastní zvukové karty (CreateForLiveMixing), AudioEngine
+            // si ji sám "vyzvedává" v Read() a mixuje k varhanám (viz AttachLiveOpl).
+            // Jména nástrojů pro formulář (Mel: Banka 008) jdou do stejného registru
+            // jako SF2 banky (ToneEngine.RegisterOp2Bank) - skutečný zvuk ale odsud
+            // nejde, ten hraje _liveOpl (viz AudioEngine.ToggleRegister).
+            if (File.Exists(OplGenMidiPath))
+            {
+                try
+                {
+                    var op2Bank = PS150.Core.Sampler.Op2Bank.Load(OplGenMidiPath);
+                    _liveOpl = PS150.Core.Sampler.OplMidiSynth.CreateForLiveMixing(op2Bank);
+                    _audioEngine.AttachLiveOpl(_liveOpl);
+                    int oplCount = ToneEngine.RegisterOp2Bank(PS150.Core.Banks._008_SoundBlaster.Number, op2Bank);
+                    _audioEngine.RegisterExclusiveBank(
+                        PS150.Core.Banks._008_SoundBlaster.Number,
+                        program => _liveOpl?.SetUniversalProgram(program));
+                    // krok66: tvrdé přepnutí banky (viz AudioEngine.HardSwitchMelodicBank) -
+                    // setProgram(0) výš sám o sobě neumlčí už rozeznělé hlasy, jen zruší
+                    // vynucený program pro příští notu.
+                    _audioEngine.RegisterHardStop(
+                        PS150.Core.Banks._008_SoundBlaster.Number,
+                        () => _liveOpl?.StopAllNotesHard());
+                    Debug.WriteLine($"[App] Živé OPL3: {oplCount} rejstříků z {OplGenMidiPath}");
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[App] Živé OPL3 se nepodařilo načíst: {ex.Message}");
+                }
+            }
+
+            // krok61: banka 2 (GsWavetableOut/Windows "Microsoft GS Wavetable Synth") pro
+            // ŽIVÉ hraní - na rozdíl od banky 8 tu NENÍ co mixovat do AudioEngine.Read(),
+            // Windows si tenhle zvuk hraje úplně sám, mimo náš mixážní pult.
+            // krok64: PŮVODNĚ si tu appka otvírala DRUHÉ, nezávislé spojení na totéž
+            // zařízení jako přehrávač .mid (GmPianoMidiPlayer) - přesně riziko, na které
+            // jsem v krok61 upozorňoval, se potvrdilo (crash.log: MidiDeviceException
+            // "Device is already in use"). Teď jde přes SharedGmOutput - JEDNO sdílené
+            // spojení pro celou appku, viz tamní komentář.
+            try
+            {
+                _liveGm = SharedGmOutput.TryGet();
+                int gmCount = ToneEngine.RegisterGeneralMidiBank(PS150.Core.Banks._002_GeneralMIDI.Number);
+                _audioEngine.RegisterExclusiveBank(
+                    PS150.Core.Banks._002_GeneralMIDI.Number,
+                    program =>
+                    {
+                        if (_liveGm == null || program == 0) return;
+                        SharedGmOutput.SendEvent(new ProgramChangeEvent((SevenBitNumber)(program - 1)) { Channel = (FourBitNumber)0 });
+                    });
+                // krok66: tvrdé přepnutí banky - MIDI CC 120 "All Sound Off" umlčí na
+                // kanálu 0 OKAMŽITĚ VŠECHNO bez ohledu na Release (na rozdíl od CC 123
+                // "All Notes Off", který by případné dozvuky ještě nechal doznít).
+                _audioEngine.RegisterHardStop(
+                    PS150.Core.Banks._002_GeneralMIDI.Number,
+                    () => SharedGmOutput.SendEvent(new ControlChangeEvent((SevenBitNumber)120, (SevenBitNumber)0) { Channel = (FourBitNumber)0 }));
+                Debug.WriteLine($"[App] Živé GM (Windows): {gmCount} rejstříků");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[App] Živé GM (Windows) se nepodařilo otevřít: {ex.Message}");
+            }
+
             // krok17/19: banky SF2 se načítají na pozadí (program mezitím hraje syntetické zvuky).
             // NATVRDO ze složky "sf2" vedle exe (nezávisle na settings.json): 003 MuseScore_General, 005 Bureå Church Ext.
             // Další banky lze dál přidat v settings.json (Sf2Banks); čísla 3 a 5 se tam ignorují.
@@ -152,13 +279,53 @@ namespace PS150.UI.Windows
                     return;
                 }
 
-                if (evt.Type == InputEventType.NoteOn && evt.Velocity > 0)
+                bool isNoteOn = evt.Type == InputEventType.NoteOn && evt.Velocity > 0;
+
+                if (isNoteOn)
                 {
                     _toneEngine?.NoteOn(evt.Note.Number, evt.Channel, evt.Velocity);
                 }
                 else
                 {
                     _toneEngine?.NoteOff(evt.Note.Number, evt.Channel);
+                }
+
+                // krok58: banka 8 (OPL3) hraje mimo ToneEngine (viz AudioEngine.ToggleRegister) -
+                // dokud je z ní zapnutý nějaký rejstřík, melodické noty (ne bicí kanál) jdou
+                // navíc i do živého OplMidiSynth. Kanál se posílá pořád stejný (0) - _liveOpl
+                // zná jen jeden "živý" hlas, žádné MIDI vícekanálové směrování tu není potřeba.
+                //
+                // krok65: NoteOn se posílá, JEN KDYŽ je banka 8 právě aktivní (jako dřív) -
+                // ale NoteOff se posílá VŽDYCKY (i když se mezitím banka přepnula pryč).
+                // Jinak: podržíš klávesu na bance 8, přepneš na jinou banku, pustíš klávesu
+                // - NoteOff se podle "je banka 8 aktivní?" zahodí, protože v tu chvíli už
+                // není, a tón zůstane v OPL3 čipu navždy "zaseklý" (klávesa tam zůstává
+                // logicky stisknutá). Poslat NoteOff navíc i tehdy, kdy daná nota na tomhle
+                // enginu vůbec nehrála, je neškodné - prostě se ignoruje.
+                if (_liveOpl != null && evt.Channel != ToneEngine.DrumChannel
+                    && (!isNoteOn || (OrganEngine?.ActiveRegisters.Any(r => r.Bank == PS150.Core.Banks._008_SoundBlaster.Number) ?? false)))
+                {
+                    // krok58b: Channel je až na ChannelEvent (předek obou), ne na
+                    // obecném MidiEvent - CS1061, kdyby proměnná byla deklarovaná jako MidiEvent.
+                    ChannelEvent oplEvent = isNoteOn
+                        ? new NoteOnEvent((SevenBitNumber)evt.Note.Number, (SevenBitNumber)Math.Clamp((int)Math.Round(evt.Velocity * 127), 1, 127))
+                        : new NoteOffEvent((SevenBitNumber)evt.Note.Number, (SevenBitNumber)0);
+                    oplEvent.Channel = (FourBitNumber)0;
+                    _liveOpl.SendEvent(oplEvent);
+                }
+
+                // krok61/65: totéž pro banku 2 (Windows GM) - program (nástroj) se nastavuje
+                // jen při zapnutí/vypnutí rejstříku (viz AudioEngine.RegisterExclusiveBank
+                // v OnStartup), tady jde jen samotná nota. NoteOff zase posíláme vždycky -
+                // viz komentář u banky 8 výš, stejný zádrhel platí identicky i tady.
+                if (_liveGm != null && evt.Channel != ToneEngine.DrumChannel
+                    && (!isNoteOn || (OrganEngine?.ActiveRegisters.Any(r => r.Bank == PS150.Core.Banks._002_GeneralMIDI.Number) ?? false)))
+                {
+                    ChannelEvent gmEvent = isNoteOn
+                        ? new NoteOnEvent((SevenBitNumber)evt.Note.Number, (SevenBitNumber)Math.Clamp((int)Math.Round(evt.Velocity * 127), 1, 127))
+                        : new NoteOffEvent((SevenBitNumber)evt.Note.Number, (SevenBitNumber)0);
+                    gmEvent.Channel = (FourBitNumber)0;
+                    SharedGmOutput.SendEvent(gmEvent);
                 }
 
                 Debug.WriteLine($"[{evt.Source}] {evt.Type} | Nota: {evt.Note.Number} ({evt.Note.FrequencyHz:F1} Hz)");
@@ -237,4 +404,4 @@ namespace PS150.UI.Windows
             base.OnExit(e);
         }
     }
-}
+}

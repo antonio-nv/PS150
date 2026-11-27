@@ -33,35 +33,41 @@
     public static class _001_SyntetickeZvuky
     {
         public const int Number = 1;
-        public static readonly BankInfo Info = new BankInfo(Number, "Syntetické zvuky, tóny (Melzerovy varhany Kutná Hora, klavíry, cembala, zvony, smyčce)", BankKind.Synthetic, "Melzer 1-200 podle hracího stolu (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon Zikmund, 500/501 aditivní, 600 smyčce. Bicí viz banka 9.");
+        // krok53: Name zkrácen na krátký kód (pro budoucí obrazovku živého
+        // hraní, kde je málo místa) - plný popis zůstává v Description.
+        public static readonly BankInfo Info = new BankInfo(Number, "Synth", BankKind.Synthetic, "Melzer 1-200 podle hracího stolu (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon Zikmund, 500/501 aditivní, 600 smyčce. Bicí viz banka 9.");
     }
 
     /// <summary>Banka 2 - General MIDI (Microsoft GS Wavetable). Programy 1-128 podle GM; zatím hraje jen přehrávač .mid.</summary>
     public static class _002_GeneralMIDI
     {
         public const int Number = 2;
-        public static readonly BankInfo Info = new BankInfo(Number, "General MIDI (Microsoft GS Wavetable)", BankKind.Planned, "Programy 1-128 podle GM; zatím hraje jen přehrávač .mid.");
+        // krok53: Name zkrácen na krátký kód.
+        public static readonly BankInfo Info = new BankInfo(Number, "GM", BankKind.Planned, "Programy 1-128 podle GM; zatím hraje jen přehrávač .mid.");
     }
 
     /// <summary>Banka 3 - MuseScore_General (SF2). Bank/program podle B000-B128 z dokumentace banky; přehrávač SF2 bude až v dalším kroku.</summary>
     public static class _003_MuseScore_General
     {
         public const int Number = 3;
-        public static readonly BankInfo Info = new BankInfo(Number, "MuseScore_General (SF2)", BankKind.Planned, "Bank/program podle B000-B128 z dokumentace banky; přehrávač SF2 bude až v dalším kroku.");
+        // krok53: Name zkrácen na krátký kód.
+        public static readonly BankInfo Info = new BankInfo(Number, "MuseScore", BankKind.Planned, "Bank/program podle B000-B128 z dokumentace banky; přehrávač SF2 bude až v dalším kroku.");
     }
 
     /// <summary>Banka 4 - Bureå Funeral Chapel 2.02 (SF2). Varhany z kaple ve Bureå (CC BY-SA), banka mimo repozitář.</summary>
     public static class _004_Burea_Funeral_Chapel
     {
         public const int Number = 4;
-        public static readonly BankInfo Info = new BankInfo(Number, "Bureå Funeral Chapel 2.02 (SF2)", BankKind.Planned, "Varhany z kaple ve Bureå (CC BY-SA), banka mimo repozitář.");
+        // krok53: Name zkrácen na krátký kód.
+        public static readonly BankInfo Info = new BankInfo(Number, "BureaFun", BankKind.Planned, "Varhany z kaple ve Bureå (CC BY-SA), banka mimo repozitář.");
     }
 
     /// <summary>Banka 5 - Bureå Church Ext 2.02 (SF2). Varhany z kostela ve Bureå, venkovní mikrofony, banka mimo repozitář.</summary>
     public static class _005_Burea_Church_Ext
     {
         public const int Number = 5;
-        public static readonly BankInfo Info = new BankInfo(Number, "Bureå Church Ext 2.02 (SF2)", BankKind.Planned, "Varhany z kostela ve Bureå, venkovní mikrofony, banka mimo repozitář.");
+        // krok53: Name zkrácen na krátký kód.
+        public static readonly BankInfo Info = new BankInfo(Number, "BureaCh", BankKind.Planned, "Varhany z kostela ve Bureå, venkovní mikrofony, banka mimo repozitář.");
     }
 
     /// <summary>Banka 6 - KORG. Původní číslování KORGu - doplní se.</summary>
@@ -82,7 +88,8 @@
     public static class _008_SoundBlaster
     {
         public const int Number = 8;
-        public static readonly BankInfo Info = new BankInfo(Number, "SoundBlaster (OPL3)", BankKind.SoundFont, "OPL3 emulace (NukedOpl) s GM instrumentální sadou z .op2/GENMIDI banky (DMXOPL apod.) - pro hrubou orientaci v prohlížeči souborů.");
+        // krok53: Name zkrácen na krátký kód.
+        public static readonly BankInfo Info = new BankInfo(Number, "OPL3", BankKind.SoundFont, "OPL3 emulace (NukedOpl) s GM instrumentální sadou z .op2/GENMIDI banky (DMXOPL apod.) - pro hrubou orientaci v prohlížeči souborů.");
     }
 
     /// <summary>
@@ -95,7 +102,8 @@
     public static class _009_SynteticBici
     {
         public const int Number = 9;
-        public static readonly BankInfo Info = new BankInfo(Number, "Syntetické zvuky, bicí (GM souprava, noty 35-81)", BankKind.Synthetic, "Vlastní, nezávislé číslování rejstříků bicích souprav - viz PS150.Core/03_Percussion. Dnes jen rejstřík 1 (GM souprava); časem klidně i další.");
+        // krok53: Name zkrácen na krátký kód.
+        public static readonly BankInfo Info = new BankInfo(Number, "SynthBici", BankKind.Synthetic, "Vlastní, nezávislé číslování rejstříků bicích souprav - viz PS150.Core/03_Percussion. Dnes jen rejstřík 1 (GM souprava); časem klidně i další.");
     }
 
     /// <summary>Seznam všech bank (nová banka = nová třída výš + řádek zde).</summary>

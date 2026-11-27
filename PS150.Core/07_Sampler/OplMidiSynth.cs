@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Melanchall.DryWetMidi.Core;
 using NAudio.Wave;
@@ -7,6 +7,41 @@ using NukedOpl;
 
 namespace PS150.Core.Sampler
 {
+    // ========================================================================
+    // krok50: PAMÁTKOVÁ OCHRANA ZVUKOVÉHO DĚDICTVÍ – OPL3 (Yamaha YMF262)
+    // ------------------------------------------------------------------------
+    // V souladu s duchem metodiky NPÚ "Péče o varhany a zvony, jejich
+    // památková ochrana" (Praha 2006) připomínáme, že "varhany jsou vzhledem
+    // ke zvukové bohatosti řazeny na přední místo mezi hudebními nástroji" -
+    // a stejně jako u varhan platí i zde: "historický zvuk nástroje... je
+    // obzvlášť charakteristickou NEHMOTNOU (intangible) složkou kulturního
+    // dědictví."
+    //
+    // Tento modul (OplMidiSynth, Op2Voice - "jeden hlas: modulátor+nosič
+    // +feedback") je proto veden jako NEKRESLENÁ, AUTENTICKÁ rekonstrukce
+    // dobového zvuku čipu YMF262 (SoundBlaster 16, 1992-1996), zprostředkovaná
+    // emulací NukedOpl. Platí tu obdobná zásada jako u barokních varhan:
+    // "modernizace... zavádění automatické obsluhy patřily k běžným
+    // praktikám", avšak nekritická modernizace (čti: nahrazení FM syntézy
+    // vzorky) by nenahraditelně připravila posluchače o "nekreslený,
+    // autorsky individualizovaný" zvuk dobového hardwaru.
+    //
+    // Rozsah ochrany (obdoba kap. 2.1.2.1 metodiky):
+    //   - chráněn je charakteristický "umělohmotný" FM timbre (NEODSTRAŇOVAT
+    //     měkčicími filtry ani reverbem bez vážného důvodu),
+    //   - chráněna je autenticita algoritmu Op2 banky GENMIDI (DMX/Doom
+    //     formát, krok35) včetně jejích deklarovaných omezení (double-voice
+    //     hraje zatím jen prvním hlasem - restaurátorský zásah plánován,
+    //     zatím odložen, viz ZJEDNODUŠENÍ níž),
+    //   - NEPŘÍPUSTNÉ zásahy: tanh/kompresory (viz krok46 - u nás ostatně
+    //     zakázané plošně, nejen z úcty k historii).
+    //
+    // Restaurátorský záměr (plánovaný, neprovedený): implementace nativního
+    // 4operátorového OPL3 režimu a plnohodnotného double-voice vrstvení by
+    // měla být dokumentována obdobně jako "osnova restaurátorského záměru"
+    // (kap. 2.1.3 metodiky) - až na to dojde čas.
+    // ========================================================================
+
     /// <summary>
     /// krok35: stereo sampler pro přehrávání .mid souborů přes emulovaný OPL3 čip
     /// (SaxxonPike/NukedOpl, čistě C# port Nuked-OPL3) s GM instrumentální sadou
@@ -27,11 +62,19 @@ namespace PS150.Core.Sampler
     ///    "rhythm mode" OPL čipu (registr 0xBD) - zvuk je ze stejné banky/dat,
     ///    jen bez specifického hardwarového omezení na 3 pevné bicí kanály.
     /// </summary>
-    public sealed class OplMidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister
+    public sealed class OplMidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister, IProvidesAudioMeter
     {
         private const int Rate = 44100;
         private const int HwChannelCount = 18;   // OPL3 = 2x 9 kanálů (2-operátorový režim)
         private const float MasterGain = 0.5f;
+
+        // krok46: VU metr (viz IProvidesAudioMeter) - stejný princip jako u
+        // Sf2MidiSynth. OPL3 čip sám o sobě přetížení nehrozí (je to pevná
+        // 16bitová aritmetika), ale po vynásobení MasterGain to pro jistotu
+        // taky hlídáme.
+        private readonly object _meterLock = new object();
+        private float _meterPeakL, _meterPeakR;
+        private bool _meterClipLatched;
 
         // Standardní rozestup registrů operátorů v rámci jedné "poloviny" OPL3
         // (9 kanálů) - viz Nuked-OPL3 zdroj (ad_slot) i klasická AdLib dokumentace.
@@ -79,6 +122,24 @@ namespace PS150.Core.Sampler
         private WaveOutEvent? _waveOut;
         private short[] _oplBuffer = Array.Empty<short>();
 
+        // krok62: OPL3 čip (i přes NukedOpl emulaci) po doznění poslední noty
+        // dál sám od sebe generuje slabý šum - reálná vlastnost dobového
+        // hardwaru, ne chyba naší strany ani žádný loopback/mikrofon (uživatel
+        // naměřil cca -72 dB, což přibližně odpovídá 12bitovému rozlišení
+        // čipu). U vlastního ToneEngine (aditivní syntéza v double) doznívání
+        // klesá až k matematické nule - u OPL3 ne, čip "šumí" donekonečna.
+        // Proto: jakmile je výstup z čipu dost dlouho (SilenceHoldSamples)
+        // prokazatelně pod SilenceAmplitude, přestaneme čip vůbec volat
+        // (_muted) a vracíme čisté ticho - probudí se okamžitě při další
+        // notě (viz reset v StartNote). Řeší to jednak zbytečnou zátěž CPU
+        // (sám o sobě by to na dnešním HW nevadilo), hlavně ale to, aby tenhle
+        // cizí šum nepodlepoval zdola dlouze doznívající rejstříky z jiných
+        // bank (např. zvon) při živém mixování v AudioEngine.
+        private const float SilenceAmplitude = 0.001f;              // cca -60 dB, bezpečně nad floorem čipu
+        private const int SilenceHoldSamples = Rate * 3 / 10;        // 0,3 s ticha, než čip umlčíme
+        private int _silentStreak;
+        private volatile bool _muted;
+
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(Rate, 2);
         public string Description { get; }
 
@@ -119,6 +180,42 @@ namespace PS150.Core.Sampler
             synth._waveOut.Init(new SampleToWaveProvider16(synth));
             synth._waveOut.Play();
             return synth;
+        }
+
+        /// <summary>
+        /// krok58: stejné jako TryCreate, ale BEZ vlastního WaveOutEvent - pro ŽIVÉ
+        /// hraní, kde tahle instance netáhne zvukovku sama (to by kolidovalo
+        /// s AudioEngine, co jede celou dobu vedle ní). Místo toho si ji AudioEngine
+        /// sám pravidelně "vyzvedává" přes Read() a přičítá k živým varhanám (viz
+        /// AudioEngine.AttachLiveOpl) - stejný _opl čip, jen jiný spotřebitel zvuku.
+        /// Bere už NAČTENOU banku (ne cestu) - ať se .op2 soubor nečte ze souboru
+        /// dvakrát, jednou pro tohle a jednou pro ToneEngine.RegisterOp2Bank.
+        /// </summary>
+        public static OplMidiSynth CreateForLiveMixing(Op2Bank bank, int universalProgram = 0)
+        {
+            var synth = new OplMidiSynth(bank, isDrumEngine: false, "Živé OPL3 (GENMIDI)");
+            synth.SetUniversalProgram(universalProgram);
+            return synth;
+        }
+
+        /// <summary>
+        /// krok66: OKAMŽITÉ umlčení bez dozvuku - na rozdíl od normálního NoteOff
+        /// (ten pustí notu do Release fáze obálky, chvíli ještě zní). Využívá
+        /// stejný mechanismus jako krok62 (_muted): od příští Read() se čip vůbec
+        /// nevolá, vrací se čisté ticho, i kdyby si čip interně "pamatoval" ještě
+        /// rozehrané kanály. Pro tvrdé přepnutí banky při živém hraní (viz
+        /// AudioEngine.RegisterHardStop) - u OPL3 stejně dozvuk přetnutý uprostřed
+        /// zní otřesně, takže tenhle tvrdý řez vadit nebude.
+        /// </summary>
+        public void StopAllNotesHard()
+        {
+            lock (_lock)
+            {
+                _voices.Clear();
+                Array.Clear(_hwChannelUsed, 0, _hwChannelUsed.Length);
+            }
+            _muted = true;
+            _silentStreak = SilenceHoldSamples;
         }
 
         /// <summary>krok35: ISupportsMelodicRegister - u bicího enginu je to tiché no-op (bicí se vybírají podle noty, ne podle rejstříku).</summary>
@@ -192,6 +289,10 @@ namespace PS150.Core.Sampler
         {
             var instrument = GetInstrument(channel, note, out int soundingNote);
             if (instrument == null) return;
+
+            // krok62: nová nota - čip (pokud byl umlčený) zase ožívá.
+            _muted = false;
+            _silentStreak = 0;
 
             // Stejná nota na stejném kanálu znovu úderem - starou rychle ukončíme.
             for (int i = _voices.Count - 1; i >= 0; i--)
@@ -389,18 +490,80 @@ namespace PS150.Core.Sampler
         // ------------------------------------------------------------------
         public int Read(float[] buffer, int offset, int count)
         {
-            if (_oplBuffer.Length < count) _oplBuffer = new short[count];
-
             int pairs = count / 2;
+
+            // krok62: čip je prokazatelně umlčený (viz komentář u _muted výš)
+            // - vůbec ho nevoláme, jen vrátíme čisté (matematické) ticho.
+            if (_muted)
+            {
+                Array.Clear(buffer, offset, count);
+                lock (_meterLock) { _meterPeakL = 0f; _meterPeakR = 0f; }
+                return count;
+            }
+
+            if (_oplBuffer.Length < count) _oplBuffer = new short[count];
             lock (_lock)
             {
                 _opl.GenerateStream(_chip, _oplBuffer.AsSpan(0, pairs * 2), pairs);
             }
 
+            float peakL = 0f, peakR = 0f;
+            bool clippedNow = false;
             for (int i = 0; i < pairs * 2; i++)
-                buffer[offset + i] = (_oplBuffer[i] / 32768f) * MasterGain;
+            {
+                float x = (_oplBuffer[i] / 32768f) * MasterGain;
+                if (Math.Abs(x) > 1.0f) { clippedNow = true; x = Math.Clamp(x, -1f, 1f); }
+                buffer[offset + i] = x;
+
+                float ax = Math.Abs(x);
+                if ((i & 1) == 0) { if (ax > peakL) peakL = ax; }
+                else { if (ax > peakR) peakR = ax; }
+            }
+            // krok48: "poslední známá hodnota", NE akumulace/nulování při
+            // každém čtení z UI - viz podrobný komentář u Sf2MidiSynth.Read().
+            lock (_meterLock)
+            {
+                _meterPeakL = peakL;
+                _meterPeakR = peakR;
+                if (clippedNow) _meterClipLatched = true;
+            }
+
+            // krok62: výstup je dost dlouho prokazatelně pod úrovní šumu čipu
+            // -> příští Read() už čip vůbec nevolá (viz blok na začátku).
+            if (peakL < SilenceAmplitude && peakR < SilenceAmplitude)
+            {
+                _silentStreak += pairs;
+                if (_silentStreak >= SilenceHoldSamples) _muted = true;
+            }
+            else
+            {
+                _silentStreak = 0;
+            }
 
             return pairs * 2;
+        }
+
+        /// <summary>krok48: viz IProvidesAudioMeter - vrací poslední známou hodnotu, NEnuluje ji.</summary>
+        public (float left, float right) ReadPeakLevels()
+        {
+            lock (_meterLock)
+            {
+                return (_meterPeakL, _meterPeakR);
+            }
+        }
+
+        /// <summary>krok46: viz IProvidesAudioMeter - "vyzvedni a vynuluj".</summary>
+        public bool ClipDetected
+        {
+            get
+            {
+                lock (_meterLock)
+                {
+                    bool clipped = _meterClipLatched;
+                    _meterClipLatched = false;
+                    return clipped;
+                }
+            }
         }
 
         public void Dispose()

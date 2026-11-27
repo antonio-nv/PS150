@@ -27,7 +27,7 @@ namespace PS150.Core.Sampler
     ///
     /// Vlastní stereo výstup přes WaveOutEvent; výhledově půjde výstup do společné sběrnice s DSP.
     /// </summary>
-    public sealed class Sf2MidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister
+    public sealed class Sf2MidiSynth : ISampleProvider, IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister, IProvidesAudioMeter
     {
         private const int Rate = 44100;
         private const int DrumChannel = 9;
@@ -36,7 +36,17 @@ namespace PS150.Core.Sampler
         private const float MasterGain = 0.5f;
 
         // krok21: klavír z MuseScore je v bance o ~25 dB tišší než bicí (zóny mají velký útlum) - vyrovnání.
-        private const double PianoMakeup = 8.0;
+        // krok49: 8.0 (~+18 dB) bylo nastavené na JEDEN osamocený tón. Jenže
+        // hlasy se v Read() prostě SČÍTAJÍ (žádná dynamická komprese, přesně
+        // podle zadání - přebuzení má být slyšet/vidět, ne tiše spravené) -
+        // takže hustý akord nebo pedál s víc současně znějícími tóny snadno
+        // přesáhne +-1.0 a tvrdě ořízne (to je to "přebuzení na VU"). Snížením
+        // na 4.0 (-6 dB proti původnímu) je víc rezervy pro akordy, za cenu
+        // že osamocený tichý tón je o polovinu tišší než předtím. Je to
+        // kompromis jedním číslem pro celou banku - pokud bude pořád
+        // ořezávat na hustých místech, dá se snížit dál (3.0, 2.0...), pokud
+        // bude osamocený tón moc tichý, zase zvýšit.
+        private const double PianoMakeup = 4.0;
 
         // krok31: dřív natvrdo "klavír" (B000:P000) na všech netbicích kanálech.
         // Teď buď: _forcedMelodic != null => pořád jeden vynucený rejstřík na
@@ -81,6 +91,13 @@ namespace PS150.Core.Sampler
         private double _maxGapMs, _maxReadMs, _maxSendMs, _bufferMs;
         private int _maxVoicesSeen;
         private long _nanCount, _clipCount;
+
+        // krok46: VU metr (viz IProvidesAudioMeter) - špička L/P "vyzvedni a
+        // vynuluj", přebuzení "vyzvedni a vynuluj" (zůstane true, dokud si ho
+        // UI nevyzvedne, i kdyby se stihlo mezitím zase srovnat).
+        private readonly object _meterLock = new object();
+        private float _meterPeakL, _meterPeakR;
+        private bool _meterClipLatched;
         private readonly DateTime _createdAt = DateTime.Now;
         private readonly int _gc0Start = GC.CollectionCount(0), _gc1Start = GC.CollectionCount(1), _gc2Start = GC.CollectionCount(2);
         private readonly TimeSpan _gcPauseStart = GC.GetTotalPauseDuration();
@@ -439,19 +456,68 @@ namespace PS150.Core.Sampler
                 if (_voices.Count > _maxVoicesSeen) _maxVoicesSeen = _voices.Count;
             }
 
-            // měkké omezení špiček (aby hustá polyfonie necinkala přebuzením)
+            // krok46: ŽÁDNÉ tvarování signálu (tanh) - jen tvrdý ořez na -1..1,
+            // stejně jako ToneEngine. Přebuzení má být SLYŠET (tvrdě, ne
+            // "změkčené" pryč) a VIDĚT na VU metru (ReadPeakLevels/ClipDetected
+            // níž - u hustší polyfonie prostě vyjede metr na doraz), ne tiše
+            // zaoblené beze stopy.
+            float peakL = 0f, peakR = 0f;
+            bool clippedNow = false;
             for (int i = 0; i < count; i++)
             {
                 float x = buffer[offset + i];
                 if (float.IsNaN(x) || float.IsInfinity(x)) { _nanCount++; x = 0f; }
-                else if (Math.Abs(x) > 1.0f) _clipCount++;
-                buffer[offset + i] = (float)Math.Tanh(x);
+                else if (Math.Abs(x) > 1.0f) { _clipCount++; clippedNow = true; }
+
+                x = Math.Clamp(x, -1f, 1f);
+                buffer[offset + i] = x;
+
+                float ax = Math.Abs(x);
+                if ((i & 1) == 0) { if (ax > peakL) peakL = ax; }
+                else { if (ax > peakR) peakR = ax; }
+            }
+            // krok48: "poslední známá hodnota" z TOHOTO Read() bufferu - NE
+            // akumulace špičky od posledního čtení z UI. UI (Tick()) se ptá
+            // dost možná ČASTĚJI, než jak dlouho trvá jeden audio buffer -
+            // kdyby se hodnota při každém čtení z UI nulovala (jako dřív),
+            // střídal by se na metru reálný výkon s nulou = blikání. Stejný
+            // princip jako AudioPlayer.MaxLeftPeak/MaxRightPeak (ty se taky
+            // jen přepisují, nikdy nenulují při čtení) - proto u MP3 metr
+            // nebliká a tady blikal.
+            lock (_meterLock)
+            {
+                _meterPeakL = peakL;
+                _meterPeakR = peakR;
+                if (clippedNow) _meterClipLatched = true;
             }
 
             double readMs = (Stopwatch.GetTimestamp() - readStart) * 1000.0 / Stopwatch.Frequency;
             if (readMs > _maxReadMs) _maxReadMs = readMs;
 
             return count;
+        }
+
+        /// <summary>krok48: viz IProvidesAudioMeter - vrací poslední známou hodnotu, NEnuluje ji (viz komentář u nastavování výš).</summary>
+        public (float left, float right) ReadPeakLevels()
+        {
+            lock (_meterLock)
+            {
+                return (_meterPeakL, _meterPeakR);
+            }
+        }
+
+        /// <summary>krok46: viz IProvidesAudioMeter - "vyzvedni a vynuluj".</summary>
+        public bool ClipDetected
+        {
+            get
+            {
+                lock (_meterLock)
+                {
+                    bool clipped = _meterClipLatched;
+                    _meterClipLatched = false;
+                    return clipped;
+                }
+            }
         }
 
         public void Dispose()

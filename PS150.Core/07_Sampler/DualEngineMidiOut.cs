@@ -1,3 +1,4 @@
+using System;
 using Melanchall.DryWetMidi.Core;
 
 namespace PS150.Core.Sampler
@@ -13,7 +14,7 @@ namespace PS150.Core.Sampler
     /// jako kdyby hrály dvě různé aplikace najednou - zvuková karta/Windows je
     /// smíchá sama.
     /// </summary>
-    public sealed class DualEngineMidiOut : IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister, ISupportsSyntheticRegister
+    public sealed class DualEngineMidiOut : IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister, ISupportsSyntheticRegister, IProvidesAudioMeter
     {
         // Kanál D10 podle GM standardu je index 9 (kanály se číslují od 0) -
         // stejná konvence jako Sf2MidiSynth.DrumChannel / GmPianoMidiPlayer.PercussionChannel.
@@ -75,6 +76,30 @@ namespace PS150.Core.Sampler
         public void SetSyntheticRegister(int registerNumber)
         {
             if (_tonal is ISupportsSyntheticRegister supported) supported.SetSyntheticRegister(registerNumber);
+        }
+
+        /// <summary>
+        /// krok46: VU metr (viz IProvidesAudioMeter) - _tonal a _drums hrají
+        /// každý na svůj vlastní nezávislý zvukový výstup (viz komentář u
+        /// třídy výš), ne namíchané do jednoho signálu - pro metr proto bereme
+        /// z obou vyšší hodnotu (to, co bys slyšel hlasitěji), ne součet.
+        /// </summary>
+        public (float left, float right) ReadPeakLevels()
+        {
+            var (tonalL, tonalR) = (_tonal as IProvidesAudioMeter)?.ReadPeakLevels() ?? (0f, 0f);
+            var (drumL, drumR) = (_drums as IProvidesAudioMeter)?.ReadPeakLevels() ?? (0f, 0f);
+            return (Math.Max(tonalL, drumL), Math.Max(tonalR, drumR));
+        }
+
+        /// <summary>krok46: viz IProvidesAudioMeter - přebuzený je kterýkoliv ze dvou nezávislých výstupů.</summary>
+        public bool ClipDetected
+        {
+            get
+            {
+                bool tonalClip = (_tonal as IProvidesAudioMeter)?.ClipDetected ?? false;
+                bool drumClip = (_drums as IProvidesAudioMeter)?.ClipDetected ?? false;
+                return tonalClip || drumClip;
+            }
         }
     }
 }

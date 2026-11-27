@@ -1,3 +1,4 @@
+using System;
 using Melanchall.DryWetMidi.Core;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -50,7 +51,7 @@ namespace PS150.Core.Sampler
     /// rejstříky, zapne jen tenhle) - kombinování víc rejstříků najednou
     /// (tutti/pléno) zůstává jen živému hraní, pro .mid soubor stačí jeden.
     /// </summary>
-    public sealed class SyntheticMidiSynth : ISampleProvider, IMidiOut, ISupportsSyntheticRegister
+    public sealed class SyntheticMidiSynth : ISampleProvider, IMidiOut, ISupportsSyntheticRegister, IProvidesAudioMeter
     {
         private const int Rate = 44100;
         private const int VolumeControlNumber = 7;   // GM/MIDI CC7 = Channel Volume
@@ -59,6 +60,17 @@ namespace PS150.Core.Sampler
         private readonly int _bankNumber;
         private WaveOutEvent? _waveOut;
         private volatile float _volumeGain = 1.0f;    // (127/127)^2, dokud nepřijde CC7
+
+        // krok46: VU metr (viz IProvidesAudioMeter) - stejný princip jako u
+        // Sf2MidiSynth/OplMidiSynth. ToneEngine sám hlídá tvrdý ořez (žádný
+        // tanh) a vystavuje ClipDetected (viz ToneEngine.GenerateNextSample) -
+        // to se tu jen "zachytává" PŘED vynásobením hlasitostí (Vol), ať je
+        // vidět přebuzení samotného nástroje/rejstříku bez ohledu na to, jak
+        // potichu ho zrovna posloucháš (stejný princip jako "pre-fader peak"
+        // u AudioPlayer.cs). Mono signál se duplikuje do L i P stejně jako v Read().
+        private readonly object _meterLock = new object();
+        private float _meterPeak;
+        private bool _meterClipLatched;
 
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(Rate, 2);
         public string Description { get; }
@@ -128,13 +140,51 @@ namespace PS150.Core.Sampler
         {
             float gain = _volumeGain;
             int frames = count / 2;
+            float peak = 0f;
+            bool clippedNow = false;
             for (int i = 0; i < frames; i++)
             {
-                float s = (float)_engine.GenerateNextSample() * gain;   // mono, ToneEngine ořezává na -1..1 ještě před hlasitostí
+                double raw = _engine.GenerateNextSample();   // mono, ToneEngine ořezává na -1..1 ještě před hlasitostí
+                if (_engine.ClipDetected) clippedNow = true;  // krok46: "pre-fader" - bez ohledu na Vol
+
+                float s = (float)raw * gain;
                 buffer[offset + 2 * i] = s;
                 buffer[offset + 2 * i + 1] = s;
+
+                float ax = Math.Abs(s);
+                if (ax > peak) peak = ax;
+            }
+            // krok48: "poslední známá hodnota", NE akumulace/nulování při
+            // každém čtení z UI - viz podrobný komentář u Sf2MidiSynth.Read().
+            lock (_meterLock)
+            {
+                _meterPeak = peak;
+                if (clippedNow) _meterClipLatched = true;
             }
             return count;
+        }
+
+        /// <summary>krok48: viz IProvidesAudioMeter - vrací poslední známou hodnotu, NEnuluje ji. Mono, stejná hodnota pro L i P.</summary>
+        public (float left, float right) ReadPeakLevels()
+        {
+            lock (_meterLock)
+            {
+                return (_meterPeak, _meterPeak);
+            }
+        }
+
+        /// <summary>krok46: viz IProvidesAudioMeter - "vyzvedni a vynuluj".</summary>
+        public bool ClipDetected
+        {
+            get
+            {
+                lock (_meterLock)
+                {
+                    bool clipped = _meterClipLatched;
+                    _meterClipLatched = false;
+                    return clipped;
+                }
+            }
         }
 
         public void Dispose()

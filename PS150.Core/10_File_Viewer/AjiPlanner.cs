@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -214,7 +214,7 @@ namespace PS150.Core
         // ---------------------- NASTAVENÍ (natvrdo) ----------------------
 
         /// <summary>Které ladění se použije. Zkuste JustIntonation5Limit, QuarterCommaMeantone (barokní) nebo Pythagorean (starověké).</summary>
-        public const AjiTemperament ChosenTemperament = AjiTemperament.Pythagorean;
+        public const AjiTemperament ChosenTemperament = AjiTemperament.JustIntonation5Limit;
 
         /// <summary>Délka okna pro určení tóniny (sekundy). Delší = stabilnější, ale pomalejší na modulace.</summary>
         public const double WindowSeconds = 8.0;
@@ -278,10 +278,12 @@ namespace PS150.Core
         }
 
         // Krumhansl-Kessler profily (jak moc se který stupeň vyskytuje v dur / moll).
-        private static readonly double[] MajorProfile =
+        // krok69: internal (ne private) - používá je i LiveAji (živé hraní, viz
+        // PS150.Core/02_ToneEngine/LiveAji.cs), aby neměl vlastní kopii stejných čísel.
+        internal static readonly double[] MajorProfile =
             { 6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88 };
 
-        private static readonly double[] MinorProfile =
+        internal static readonly double[] MinorProfile =
             { 6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17 };
 
         // ---------------------- HLAVNÍ VSTUP ----------------------
@@ -560,8 +562,11 @@ namespace PS150.Core
         /// <summary>
         /// Korelace histogramu tónů s profilem každé z 24 tónin (Pearsonův
         /// korelační koeficient). Index 0-11 = dur s danou tonikou, 12-23 = moll.
+        /// krok69: internal (ne private) - stejný výpočet používá i LiveAji (živé
+        /// hraní), jen s klouzavým/živým histogramem místo histogramu z celého
+        /// souboru - viz PS150.Core/02_ToneEngine/LiveAji.cs.
         /// </summary>
-        private static double[] ScoreKeys(double[] hist)
+        internal static double[] ScoreKeys(double[] hist)
         {
             var scores = new double[24];
 
