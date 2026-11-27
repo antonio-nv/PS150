@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace PS150.Core.Filters
 {
@@ -33,6 +33,35 @@ namespace PS150.Core.Filters
             double b1 = -(1.0 + cosw);
             double b2 = (1.0 + cosw) / 2.0;
             Finish(b0, b1, b2, 1.0 + alpha, -2.0 * cosw, 1.0 - alpha);
+        }
+
+        /// <summary>
+        /// krok82: zvonová (peaking) EQ křivka - zesílí/zeslabí jen okolí centerHz o
+        /// gainDb, mimo pásmo nechá signál beze změny (na rozdíl od LowPass/HighPass,
+        /// co jsou "propusti"). Q určuje šířku zvonu (vyšší Q = užší/ostřejší).
+        /// Používá se pro parametrické EQ na kanálu mixáku i pro jedno pásmo
+        /// grafického ekvalizéru (viz PS150.Core.Equalizers). Stejný recept
+        /// "Audio EQ Cookbook" jako SetLowPass/SetHighPass výš.
+        /// </summary>
+        public void SetPeakingEq(double sampleRate, double centerHz, double gainDb, double q = 1.0)
+        {
+            if (sampleRate <= 0.0) throw new ArgumentOutOfRangeException(nameof(sampleRate));
+            if (centerHz <= 0.0 || centerHz >= sampleRate / 2.0)
+                throw new ArgumentOutOfRangeException(nameof(centerHz), "Středový kmitočet musí ležet mezi 0 a polovinou vzorkovacího kmitočtu.");
+            if (q <= 0.0) throw new ArgumentOutOfRangeException(nameof(q));
+
+            double amplitude = Math.Pow(10.0, gainDb / 40.0);
+            double w0 = 2.0 * Math.PI * centerHz / sampleRate;
+            double cosw = Math.Cos(w0);
+            double alpha = Math.Sin(w0) / (2.0 * q);
+
+            double b0 = 1.0 + alpha * amplitude;
+            double b1 = -2.0 * cosw;
+            double b2 = 1.0 - alpha * amplitude;
+            double a0 = 1.0 + alpha / amplitude;
+            double a1 = -2.0 * cosw;
+            double a2 = 1.0 - alpha / amplitude;
+            Finish(b0, b1, b2, a0, a1, a2);
         }
 
         private static void Prepare(double sampleRate, double cutoffHz, double q, out double cosw, out double alpha)

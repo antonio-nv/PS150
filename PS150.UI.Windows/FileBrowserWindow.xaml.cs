@@ -38,16 +38,19 @@ namespace PS150.UI.Windows
         // to naopak vysoký úzký pruh.
         private const int Cols = 121;
 
-        // Záhlaví má pevných pět řádků:
+        // Záhlaví má pevných osm řádků:
         //   0 titulek okna (vlastní) + transportní tlačítka + [_] [X]
         //   1 cesta a jméno souboru (jeden řádek, bez zalomení)
-        //   2 VU metry L a P (krok46: teď VŽDY, i u .mid souborů - dřív se tu
+        //   2 horní legenda VU metru(ů) (krok73)
+        //   3 nápovědná dB stupnice VU metru(ů) (krok74, čistě dekorativní)
+        //   4 VU metry L a P (krok46: teď VŽDY, i u .mid souborů - dřív se tu
         //     u .mid souborů kreslil řádek "MIDI (engine)...", VU metry se
         //     tím pádem vůbec nezobrazily, i když se peak už dávno měřil)
-        //   3 "MIDI (engine), kanálů: N" (jen u .mid souborů, jinak prázdné)
-        //   4 čas, hlasitost, ladění, AJI, výstup
+        //   5 dolní legenda VU metru(ů) (krok73)
+        //   6 "MIDI (engine), kanálů: N" (jen u .mid souborů, jinak prázdné)
+        //   7 čas, hlasitost, ladění, AJI, výstup
         // Vše další (zadávání ladění, varhanní panel, MIDI osnovy) se kreslí pod ně.
-        private const int HeaderRows = 5;
+        private const int HeaderRows = 8;
 
         // Sloupec, kde v titulku začínají transportní tlačítka [<<] [►] [▄] [>>].
         private const int TransportCol = 20;
@@ -169,6 +172,43 @@ namespace PS150.UI.Windows
         private FormField _fLiveDrmNumber = null!;
         private int _selLiveDrmBank = PS150.Core.Banks._009_SynteticBici.Number;   // vybraná BICÍ banka
         private int _selLiveDrmNumber = 1;                                        // vybraný rejstřík v ní
+
+        // krok77/78: zkušební zadávací pole pro náhled mixpultu (viz RenderWidgetPreview) -
+        // BEZ vazby na reálný zvuk, jen k vyzkoušení vzhledu a ovládání (klik/kolečko/+-/
+        // zadání čísla) přímo přes pruhy metru/faderu. Hodnoty žijí jen v paměti okna,
+        // nic se neukládá.
+        // krok78: označení vstupu/matrixu (_demoMixerInput) NENÍ zadávací pole - jen
+        // zobrazovaný text vedle skutečného metru (viz DrawMeterBar v RenderWidgetPreview),
+        // proto k němu NENÍ žádný FormField.
+        private double _demoMixerInput = 1.0;
+        private double _demoFaderDb = -6.0;
+        private readonly double[] _demoMixerField = new double[8];
+
+        private FormField _fDemoFader = null!;
+        private readonly FormField[] _fDemoMixerFields = new FormField[8];
+        private static readonly string[] DemoMixerFieldNames = { "Gain", "Pan", "Gate", "Comp", "HPF", "E.Ga", "E.Fr", "E.Q" };
+
+        // krok80: 32 pásem ekvalizéru - PŮVODNĚ (krok79) ISO třetinooktávová řada
+        // (decimální "pěkná čísla" 20, 25, 31.5, 40... - průmyslový akustický standard
+        // pro kalibraci reproduktorů růžovým šumem), ale ta nemá s hudební temperovanou
+        // stupnicí nic společného (je založená na desítkové "preferred number" řadě,
+        // poměr sousedních kmitočtů 10^(1/10) ≈ 1,259), takže nejbližší tóny vycházely
+        // náhodně na D/G/B - prostý souběh dvou nesouvisejících číselných řad.
+        // krok80: nahrazeno SKUTEČNOU temperovanou velkou tercií (4 půltóny, poměr
+        // přesně 2^(1/3) ≈ 1,2599 - nápadně blízko tomu ISO poměru, ale tentokrát
+        // doopravdy hudební), odvozenou od komorního A4 = 440Hz, přesně podle
+        // uživatelovy tabulky C♯/F/A. Vychází z toho rovných 32 pásem (C♯0 = 17,3Hz
+        // až F10 = 22350,6Hz), což se navíc dělí na 4 stejné skupiny po osmi
+        // (8+8+8+8), ještě hezčí než předchozích 8+8+8+7.
+        // krok82: kmitočty se už NEPOČÍTAJÍ tady - berou se z PS150.Core.Equalizers.
+        // GraphicEqBands, což je teď JEDINÉ místo pravdy, sdílené s doopravdy
+        // filtrujícím GraphicEqualizer32Band (viz PS150.Core/05_Equalizers), aby se
+        // zobrazený kmitočet pásma nemohl nikdy rozejít s tím, co se skutečně filtruje.
+        private static readonly double[] EqBandFreqHz = PS150.Core.Equalizers.GraphicEqBands.CenterFreqHz;
+        private const int EqBandCount = PS150.Core.Equalizers.GraphicEqBands.Count;   // = 32, viz RenderEqBands
+
+        private readonly double[] _eqBandGainDb = new double[EqBandCount];
+        private readonly FormField[] _fEqBandGain = new FormField[EqBandCount];
 
         // krok55: jediná banka, co dnes hraje bicí - melodický řádek ji ze svého
         // výběru vylučuje, bicí řádek se naopak drží jen jí. Až vznikne druhá
@@ -1319,6 +1359,46 @@ namespace PS150.UI.Windows
             pDrmNum.OnTypedCommit = v => ToggleTypedDrmRegister((int)Math.Round(v));
             pDrmNum.OnStepCommit = v => StepRegister(_selLiveDrmBank, (int)Math.Round(v));   // krok70: +/- přepne rovnou, bez Enter
             _fLiveDrmNumber = _form.Add(pDrmNum);
+
+            // ---- krok77/78: zkušební pole pro náhled mixpultu - jen Fader/8 kanálových
+            // polí jsou SKUTEČNÁ zadávací pole, označení vstupu/matrixu zůstává jen
+            // zobrazovaný text (viz DrawMeterBar v RenderWidgetPreview), proto pro ně
+            // žádný Parameter/FormField není. ----
+            var pDemoFader = Parameter.Number(
+                "Fader", "dB", -60, 10, 1, new[] { 0.1, 0.5, 1.0 },
+                () => _demoFaderDb,
+                v => _demoFaderDb = v,
+                showSign: true,
+                defaultValue: -6.0);
+            _fDemoFader = _form.Add(pDemoFader);
+
+            for (int i = 0; i < 8; i++)
+            {
+                int idx = i;   // zachytit pro lambdu (jinak by všechna pole sdílela poslední i)
+                var pField = Parameter.Number(
+                    DemoMixerFieldNames[i], "", -99, 99, 0, new[] { 1.0, 1.0, 10.0 },
+                    () => _demoMixerField[idx],
+                    v => _demoMixerField[idx] = v,
+                    showSign: true,
+                    defaultValue: 0.0);
+                _fDemoMixerFields[i] = _form.Add(pField);
+            }
+
+            // ---- krok79/80: 32 tercie-oktávových (velká tercie, C♯/F/A) pásem
+            // ekvalizéru - skutečná zadávací pole ±12dB na pásmo, kmitočet/název tónu
+            // u každého pásma zůstává jen zobrazovaný text (viz NoteName/FormatFreqCompact
+            // v RenderEqBands). ----
+            for (int i = 0; i < EqBandCount; i++)
+            {
+                int idx = i;   // zachytit pro lambdu (jinak by všechna pole sdílela poslední i)
+                var pBand = Parameter.Number(
+                    $"Eq{EqBandFreqHz[idx]:0.#}Hz", "dB", -12, 12, 1, new[] { 0.1, 0.5, 1.0 },
+                    () => _eqBandGainDb[idx],
+                    v => _eqBandGainDb[idx] = v,
+                    showSign: true,
+                    defaultValue: 0.0);
+                _fEqBandGain[idx] = _form.Add(pBand);
+            }
         }
 
         /// <summary>
@@ -1465,7 +1545,11 @@ namespace PS150.UI.Windows
 
         private bool EnsureRows(int desiredRows)
         {
-            desiredRows = Math.Clamp(desiredRows, HeaderRows, 60);
+            // krok79: horní mez zvednuta z 60 na 200 - samotný 31pásmový ekvalizér
+            // (viz WidgetPreviewRows) teď potřebuje přes 50 řádků i bez varhanního
+            // panelu/notové osnovy, takže 60 už nestačilo (obsah by se tiše
+            // oříznul). 200 dává slušnou rezervu i do budoucna.
+            desiredRows = Math.Clamp(desiredRows, HeaderRows, 200);
             if (desiredRows == _lastDesiredRows) return false;
             _lastDesiredRows = desiredRows;
 
@@ -1568,31 +1652,62 @@ namespace PS150.UI.Windows
             _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
             _grid.WriteLine();
 
-            // ============ Řádek 2: VU metry L a P (krok46: VŽDY, i u .mid souborů) ============
+            // ============ Řádky 2-5: VU metry L a P, rámované legendou (krok73/74) ============
+            // krok72: mocninná (log/exp) stupnice místo dřívější lineární, segmenty
+            // kreslené barvou POZADÍ (mezera), ne znakem - viz AudioMeter.RenderMeterCells.
+            // krok73: "formulářový" styl - nahoře a dole stejná legenda
+            // (MeterBoxTop/MeterBoxBottom), žádný text vlevo/vpravo od pruhu - značka
+            // kanálu (L/P) i hodnota v dB jsou napsané PŘÍMO přes segmenty uvnitř
+            // pruhu (viz DrawMeterBar). Dva pruhy vedle sebe bez mezery, přesně jako
+            // ve skici - při šířce 40 na metr se dva vejdou vedle sebe s rezervou.
+            // krok74: mezi horní legendu a pruh přibyl nápovědný řádek s dB stupnicí
+            // (MeterBoxTicks) - čistě dekorativní, bez nároku na přesné zarovnání na
+            // hranice segmentů (ty jsou dané mocninnou křivkou, ne touhle stupnicí).
+            // krok78: žádná mezera úplně vlevo (ať rámeček začíná na sloupci 0) -
+            // mezera se místo toho přesunula MEZI kanály L a P, ať se text
+            // "-120dBP" rozdělí na čitelné "-120dB P". Jen u tohohle jednoduchého
+            // stereo VU metru - u spektrálního analyzéru/mixpultu se mezera
+            // nevejde (přesně na těsno, viz RenderWidgetPreview).
             _grid.SetCursorPosition(0, 2);
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxTop + " " + MeterBoxTop);
+            _grid.ResetColor();
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
+
+            _grid.SetCursorPosition(0, 3);
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxTicks + " " + MeterBoxTicks);
+            _grid.ResetColor();
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
+
+            _grid.SetCursorPosition(0, 4);
             {
-                const int meterWidth = 44;
+                const int meterWidth = 40;
 
-                _grid.Write(" L:[");
-                _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.Write(AudioMeter.RenderBar(_leftDb, meterWidth));
                 _grid.ResetColor();
-                _grid.Write($"]{_leftDb,6:F1}dB  ");
-
-                _grid.Write("R:[");
-                _grid.ForegroundColor = ConsoleColor.Green;
-                _grid.Write(AudioMeter.RenderBar(_rightDb, meterWidth));
+                DrawMeterBar(_leftDb, meterWidth, "L");
+                _grid.BackgroundColor = ConsoleColor.Black;
+                _grid.Write(" ");
+                DrawMeterBar(_rightDb, meterWidth, "P");
                 _grid.ResetColor();
-                _grid.Write($"]{_rightDb,6:F1}dB");
             }
             _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
             _grid.WriteLine();
 
-            // ============ Řádek 3: "MIDI (engine), kanálů: N" (jen u .mid souborů) ============
+            _grid.SetCursorPosition(0, 5);
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxBottom + " " + MeterBoxBottom);
+            _grid.ResetColor();
+            _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
+            _grid.WriteLine();
+
+            // ============ Řádek 6: "MIDI (engine), kanálů: N" (jen u .mid souborů) ============
             // krok46: dřív byl tohle "else" větev řádku 2 (VU metry/MIDI info
             // se vzájemně vylučovaly na jednom řádku) - teď má každý svůj
             // vlastní řádek, ať je vidět obojí najednou.
-            _grid.SetCursorPosition(0, 3);
+            _grid.SetCursorPosition(0, 6);
             if (_isMidiMode)
             {
                 int channelCount;
@@ -1605,7 +1720,7 @@ namespace PS150.UI.Windows
             _grid.Write(new string(' ', Math.Max(0, Cols - _grid.CursorX)));
             _grid.WriteLine();
 
-            // ============ Řádek 4: čas, textová pole (hlasitost, bicí, ladění, AJI), stav ============
+            // ============ Řádek 7: čas, textová pole (hlasitost, bicí, ladění, AJI), stav ============
             // Pole [ ] jsou ovladatelná myší (klik, kolečko), Tab, +/- a zadáním
             // čísla - viz FieldForm v Core. Každé pole se při vykreslení ohlásí
             // formuláři (Place), aby věděl, kam kliknout.
@@ -1614,7 +1729,7 @@ namespace PS150.UI.Windows
             string timeStr = $"{current:mm\\:ss}/{total:mm\\:ss}";
 
             _form.BeginFrame();
-            _grid.SetCursorPosition(0, 4);
+            _grid.SetCursorPosition(0, 7);
             _grid.ResetColor();
 
             void Segment(string text, ConsoleColor color)
@@ -1663,17 +1778,13 @@ namespace PS150.UI.Windows
                 WriteField(_fDrums, "Bicí ", "  ");
             }
 
-            // krok29: pole "Lad" zrušeno - T a A4 se zobrazují vždy, odchylka
-            // v centech jen když není neutrální (T=0 a A4=440).
+            // krok29: pole "Lad" zrušeno - T a A4 se zobrazují vždy.
             // krok38: na přání zkráceno "T " -> "T" a "st  " -> "  " (ušetří
             // místo na řádku stavového řádku, kam se teď vejde i DrmR).
+            // krok71: přepočet na centy (žlutý "+800,0c") úplně zrušen - na
+            // formulář 121 znaků se s ním nevešel bicí rejstřík (DrmR).
             WriteField(_fTranspose, "T", "  ");
             WriteField(_fA4, "A4 ", "Hz  ");
-
-            if (!_tuning.IsNeutral)
-            {
-                Segment($"{_tuning.TotalCents:+0.0;-0.0;+0.0}c  ", ConsoleColor.Yellow);
-            }
 
             WriteField(_fAji, "AJI ", "  ");
 
@@ -1898,6 +2009,330 @@ namespace PS150.UI.Windows
             _grid.ResetColor();
         }
 
+        /// <summary>krok73/74: zkušební "formulářová" legenda nad/pod/uvnitř VU metru - stejná
+        /// šířka jako DrawMeterBar (40 znaků), beze změny barvy (DarkGray nastavuje volající).
+        /// Má to být jednotný styl i pro budoucí spektrální analyzér/ekvalizér/mixpult.
+        /// MeterBoxTicks je čistě dekorativní nápověda dB stupnice, NENÍ přesně zarovnaná
+        /// na hranice segmentů (ty řídí mocninná křivka, viz AudioMeter.RenderMeterCells) -
+        /// doplněno doprava mezerami na plnou šířku 40 znaků.</summary>
+        private const string MeterBoxTop = "┌───────┬───────┬───────┬───────┬──────┐";
+        private const string MeterBoxBottom = "└───────┴───────┴───────┴───────┴──────┘";
+        private const string MeterBoxTicks = "-80     -40     -20     -10     -5     0";
+
+        /// <summary>
+        /// krok72/73/74: vykreslí jeden pruh VU metru šířky <paramref name="width"/> na
+        /// aktuální pozici kurzoru. Segmenty = barva POZADÍ (mezera): tmavě zelená pro
+        /// normální rozsah (krok74 - původní jasně zelená "přebíjela" bílý text), červená
+        /// (jasná, ať pořádně "svítí") pro limitaci/nejsilnější hodnoty (viz
+        /// AudioMeter.RenderMeterCells), černá, kde nesvítí. krok74: značka kanálu
+        /// (<paramref name="channelLabel"/>, např. "L"/"P") je úplně nalevo v pruhu,
+        /// hodnota v dB zůstává zarovnaná doprava (nejblíž limitaci, kde je nejdůležitější) -
+        /// obojí bílým písmem, podkladová barva segmentu pod písmeny zůstává beze změny.
+        /// Žádný text se nepíše mimo tenhle pruh (ani před, ani za).
+        /// </summary>
+        private void DrawMeterBar(double db, int width, string channelLabel)
+        {
+            var cells = PS150.Core.AudioMeter.RenderMeterCells(db, width);
+            string valueText = $"{db,6:F1}dB";
+            int valueStart = Math.Max(0, width - valueText.Length);
+
+            for (int i = 0; i < width; i++)
+            {
+                _grid.BackgroundColor = cells[i] switch
+                {
+                    PS150.Core.MeterCellColor.Hot => ConsoleColor.Red,
+                    PS150.Core.MeterCellColor.Normal => ConsoleColor.DarkGreen,
+                    _ => ConsoleColor.Black
+                };
+
+                if (i < channelLabel.Length)
+                {
+                    _grid.ForegroundColor = ConsoleColor.White;
+                    _grid.Write(channelLabel[i].ToString());
+                }
+                else if (i >= valueStart && i - valueStart < valueText.Length)
+                {
+                    _grid.ForegroundColor = ConsoleColor.White;
+                    _grid.Write(valueText[i - valueStart].ToString());
+                }
+                else
+                {
+                    _grid.Write(" ");
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // krok76: zkušební "formulářová" skořápka pro spektrální analyzér/
+        // ekvalizér a mixpult - stejný grafický jazyk jako VU metr (legenda
+        // nahoře/dole, hodnota přímo v pruhu), zatím BEZ reálných dat (žádná
+        // FFT, žádné skutečné EQ pásmo, žádný model kanálů mixpultu - to
+        // všechno je samostatný, mnohem větší krok). Jde jen o vizuální
+        // náhled jednoho příkladového pásma / jednoho příkladového kanálu.
+        // ------------------------------------------------------------------
+
+        private const string EqBoxTop = "┌────────┬───────┐";
+        private const string EqBoxBottom = "└────────┴───────┘";
+        private const string EqBoxTicks = "-12      0     +12";
+
+        private const string FaderBoxTicks = "-∞      -40     -20     -10     0    +10";
+
+        private const string FieldsBoxTop = "┌────┬────┬────┬────┬────┬────┬────┬────┐";
+        private const string FieldsBoxBottom = "└────┴────┴────┴────┴────┴────┴────┴────┘";
+        private const string FieldsBoxLabels = "Gain Pan  Gate Comp HPF  E.Ga E.Fr E.Q   ";
+
+        /// <summary>
+        /// krok79/80: 32 pásem, zobrazená po osmi (viz RenderEqBands) - 1 prázdný řádek +
+        /// 1 popisek + horní rámeček + horní stupnice + 32 řádků pásem + stupnice po
+        /// každé ze 4 skupin (8+8+8+8) + dolní rámeček.
+        /// = 2 + 2 + EqBandCount + 4 + 1
+        /// </summary>
+        private const int EqBandsBlockRows = 2 + 2 + EqBandCount + 4 + 1;
+
+        /// <summary>Počet řádků, které si ukázka mixpultu zabere - viz RenderWidgetPreview.
+        /// 1 prázdný řádek + 1 popisek + 4 (horní legenda/stupnice/pruh/dolní legenda).</summary>
+        private const int MixerBlockRows = 1 + 1 + 4;
+
+        private const int WidgetPreviewRows = EqBandsBlockRows + MixerBlockRows;
+
+        private static readonly string[] NoteNamesSharp =
+            { "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B" };
+
+        /// <summary>
+        /// krok79/80/81: název nejbližšího tónu v temperované řadě podle AKTUÁLNÍHO
+        /// ladění (_tuning.ReferenceA4Hz) - počítá se s plnou chromatickou řadou (12
+        /// půltónů), aby zaokrouhlení na nejbližší půltón bylo přesné. krok80: křížek
+        /// se zobrazuje normálně (C♯ zůstává "C♯") - místa ve formuláři je dost.
+        /// krok81: u not BEZ křížku (A, F...) je na jeho místě mezera, ne nic - tím
+        /// pádem je písmeno+znak(křížek/mezera) vždy přesně 2 znaky a oktáva (a po ní
+        /// čárka s kmitočtem v RenderEqBands) drží stejný sloupec napříč všemi pásmy,
+        /// místo aby "poskakovala" podle toho, jestli má tón křížek nebo ne. Jedinou
+        /// výjimkou je dvojciferná desátá oktáva (C♯10/F10) - tam se sloupec posune,
+        /// to už se zarovnat nedá.  Oktáva ve vědecké notaci (A4 = komorní A = 440Hz,
+        /// střední C = C4).
+        /// </summary>
+        private string NoteName(double freqHz)
+        {
+            if (freqHz <= 0.0) return "--";
+            double a4 = _tuning.ReferenceA4Hz;
+            int semitoneFromA4 = (int)Math.Round(12.0 * Math.Log2(freqHz / a4));
+            int midi = 69 + semitoneFromA4;
+            int noteIndex = ((midi % 12) + 12) % 12;
+            int octave = (midi / 12) - 1;
+            string full = NoteNamesSharp[noteIndex];
+            string letter = full.Substring(0, 1);
+            string sharpOrSpace = full.Length > 1 ? "♯" : " ";   // krok81: mezera místo chybějícího křížku, ať sloupec drží
+            return $"{letter}{sharpOrSpace}{octave}";
+        }
+
+        /// <summary>
+        /// krok79: hodně zhuštěný zápis kmitočtu - pod 1000Hz celé číslo v Hz ("350"),
+        /// od 1000Hz výš v kHz ("2,2k"/"17k"), nad 10kHz bez desetinného místa, ať se
+        /// text vejde vedle názvu tónu. Desetinný oddělovač jde přes výchozí formátování
+        /// (stejně jako dB hodnota v DrawMeterBar), takže na českém Windows vyjde čárka.
+        /// </summary>
+        private static string FormatFreqCompact(double freqHz)
+        {
+            if (freqHz < 1000.0) return $"{freqHz:0}";
+            double khz = freqHz / 1000.0;
+            return khz < 10.0 ? $"{khz:0.0}k" : $"{khz:0}k";
+        }
+
+        /// <summary>
+        /// krok77: společná část pro zaostřené/editované/chybné zadávací pole přes
+        /// libovolně široký pruh (metr/fader/úzké mixpultové pole) - barva FieldStyle
+        /// (azurová/žlutá/tmavě červená) PŘEBIJE barvu celého úseku, text je živý
+        /// obsah pole (_form.Display - se závorkami a podtržítkem při psaní), ať je
+        /// jasně vidět, že se do něj dá psát. Zarovnáno doprava, oříznuté zleva,
+        /// pokud se nevejde.
+        /// </summary>
+        private void WriteFocusedFieldOverlay(FormField field, int width, FieldStyle style)
+        {
+            _grid.BackgroundColor = style switch
+            {
+                FieldStyle.Editing => ConsoleColor.Yellow,
+                FieldStyle.Error => ConsoleColor.DarkRed,
+                _ => ConsoleColor.Cyan
+            };
+            _grid.ForegroundColor = ConsoleColor.Black;
+
+            string text = _form.Display(field);
+            if (text.Length > width) text = text.Substring(text.Length - width);
+            _grid.Write(text.PadLeft(width));
+        }
+
+        /// <summary>
+        /// krok76/77: lineární pruh tahového potenciometru/faderu (ekvalizér ±12dB,
+        /// kanálový fader...), celý je ZAOSTŘITELNÉ pole. Na rozdíl od DrawMeterBar
+        /// (mocninná křivka, tři barvy včetně červené pro limitaci) je tu jen "ujetá
+        /// dráha" (šedě) od levého okraje po aktuální hodnotu a zbytek dráhy ČERNĚ
+        /// (krok77: ne červeně jako dřív - fader/EQ smí jít do přebuzení, není to
+        /// chyba, takže žádné výstražné červené zvýraznění). Při zaostření/editaci
+        /// barva FieldStyle přebije celý pruh - viz WriteFocusedFieldOverlay.
+        /// </summary>
+        private void DrawFaderBarField(FormField field, int width, double minValue, double maxValue, string unit)
+        {
+            FieldStyle style = _form.StyleOf(field);
+            _form.Place(field, _grid.CursorY, _grid.CursorX, width);
+
+            if (style != FieldStyle.Normal)
+            {
+                WriteFocusedFieldOverlay(field, width, style);
+                return;
+            }
+
+            var filled = PS150.Core.AudioMeter.RenderFaderFill(field.Parameter.Value, width, minValue, maxValue);
+            string valueText = field.Parameter.FormatValue() + unit;
+            int valueStart = Math.Max(0, width - valueText.Length);
+
+            for (int i = 0; i < width; i++)
+            {
+                _grid.BackgroundColor = filled[i] ? ConsoleColor.DarkGray : ConsoleColor.Black;
+
+                if (i >= valueStart && i - valueStart < valueText.Length)
+                {
+                    _grid.ForegroundColor = ConsoleColor.White;
+                    _grid.Write(valueText[i - valueStart].ToString());
+                }
+                else
+                {
+                    _grid.Write(" ");
+                }
+            }
+        }
+
+        /// <summary>
+        /// krok77: jedno úzké zadávací pole v "nahuštěném" pruhu mixpultu (Gain/Pan/
+        /// Gate/Comp/HPF/E.Ga/E.Fr/E.Q) - v klidu bílé číslo na černém pozadí, při
+        /// zaostření/editaci barva FieldStyle přes celou šířku (viz WriteFocusedFieldOverlay).
+        /// </summary>
+        private void DrawTinyField(FormField field, int width, string valueTextNormal)
+        {
+            FieldStyle style = _form.StyleOf(field);
+            _form.Place(field, _grid.CursorY, _grid.CursorX, width);
+
+            if (style != FieldStyle.Normal)
+            {
+                WriteFocusedFieldOverlay(field, width, style);
+                return;
+            }
+
+            _grid.BackgroundColor = ConsoleColor.Black;
+            _grid.ForegroundColor = ConsoleColor.White;
+            string text = valueTextNormal.Length > width ? valueTextNormal.Substring(valueTextNormal.Length - width) : valueTextNormal;
+            _grid.Write(text.PadLeft(width));
+        }
+
+        /// <summary>
+        /// krok79/80/82: vykreslí celý 32pásmový tercie-oktávový ekvalizér (velká
+        /// tercie, C♯/F/A - kmitočty z PS150.Core.Equalizers.GraphicEqBands, viz
+        /// tam) na aktuální pozici kurzoru, zobrazený
+        /// "po osmi" (8+8+8+8 = 32 - krok80: čtyři stejné skupiny, dřív 8+8+8+7),
+        /// aby se dalo při čtení dolů snadno zkontrolovat, kde je 0dB - po každé
+        /// skupině osmi pásem se zopakuje samotná stupnice (bez rámečku, ten je jen
+        /// nahoře a dole). Pásma jsou stále jen vizuální ukázka (hodnota metru = L
+        /// kanál skutečného VU metru, ať to žije), ale zisk každého pásma je SKUTEČNÉ
+        /// zadávací pole (_fEqBandGain). Vlevo u každého pásma je místo "100Hz" teď
+        /// název nejbližšího tónu (křížek se krok80 zobrazuje normálně) + hodně
+        /// zhuštěná frekvence (viz NoteName/FormatFreqCompact), např. "F4,349"
+        /// nebo "C♯10,18k".
+        /// </summary>
+        private void RenderEqBands()
+        {
+            _grid.WriteLine();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.WriteLine(" Ekvalizér, 32 tercie-oktávových pásem (velká tercie C♯/F/A, 17Hz-22kHz), se zadávacími poli:");
+            _grid.ResetColor();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxTop + EqBoxTop);
+            _grid.ResetColor();
+            _grid.WriteLine();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxTicks + EqBoxTicks);
+            _grid.ResetColor();
+            _grid.WriteLine();
+
+            int[] groupSizes = { 8, 8, 8, 8 };   // 8+8+8+8 = 32 = EqBandCount
+            int band = 0;
+            for (int g = 0; g < groupSizes.Length; g++)
+            {
+                for (int k = 0; k < groupSizes[g]; k++)
+                {
+                    double freq = EqBandFreqHz[band];
+                    string label = NoteName(freq) + "," + FormatFreqCompact(freq);
+                    DrawMeterBar(_leftDb, 40, label);
+                    DrawFaderBarField(_fEqBandGain[band], 18, -12.0, 12.0, "dB");
+                    _grid.ResetColor();
+                    _grid.WriteLine();
+                    band++;
+                }
+
+                // krok79: po každé skupině (i po té poslední, jako "závěrečná" legenda
+                // těsně před dolním rámečkem) zopakovat samotnou stupnici, bez rámečku.
+                _grid.ForegroundColor = ConsoleColor.DarkGray;
+                _grid.Write(MeterBoxTicks + EqBoxTicks);
+                _grid.ResetColor();
+                _grid.WriteLine();
+            }
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxBottom + EqBoxBottom);
+            _grid.ResetColor();
+            _grid.WriteLine();
+        }
+
+        /// <summary>
+        /// krok76/77: vykreslí ukázkový mixpultový kanál na aktuální pozici kurzoru -
+        /// čistě pro vizuální kontrolu stylu a ovládání, hodnoty jsou z části
+        /// vymyšlené/odvozené z L kanálu VU metru, ať to v náhledu žije. Fader/8 polí
+        /// mixpultu jsou SKUTEČNÁ zadávací pole (klik/kolečko/+-/zadání čísla),
+        /// označení vstupu/matrixu ("In1") zůstává jen zobrazovaný text.
+        /// </summary>
+        private void RenderWidgetPreview()
+        {
+            RenderEqBands();
+
+            _grid.WriteLine();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.WriteLine(" Mixážní pult (ukázka jednoho kanálu, přesně 121 znaků, se zadávacími poli):");
+            _grid.ResetColor();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxTop + MeterBoxTop + FieldsBoxTop);
+            _grid.ResetColor();
+            _grid.WriteLine();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxTicks + FaderBoxTicks + FieldsBoxLabels);
+            _grid.ResetColor();
+            _grid.WriteLine();
+
+            DrawMeterBar(_leftDb, 40, $"In{_demoMixerInput:F0}");   // krok78: označení vstupu/matrixu je jen zobrazovaný text, ne pole
+            DrawFaderBarField(_fDemoFader, 40, -60.0, 10.0, "dB");
+
+            _grid.BackgroundColor = ConsoleColor.Black;
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write("│");
+            for (int i = 0; i < 8; i++)
+            {
+                DrawTinyField(_fDemoMixerFields[i], 4, _fDemoMixerFields[i].Parameter.FormatValue());
+                _grid.BackgroundColor = ConsoleColor.Black;
+                _grid.ForegroundColor = ConsoleColor.DarkGray;
+                _grid.Write("│");
+            }
+            _grid.ResetColor();
+            _grid.WriteLine();
+
+            _grid.ForegroundColor = ConsoleColor.DarkGray;
+            _grid.Write(MeterBoxBottom + MeterBoxBottom + FieldsBoxBottom);
+            _grid.ResetColor();
+            _grid.WriteLine();
+        }
+
         private void RenderStatusArea()
         {
             bool midiConnected = App.Input?.IsLiveDeviceConnected ?? false;
@@ -1946,7 +2381,7 @@ namespace PS150.UI.Windows
             int melLines = showOrganPanel ? WrapRegisterNames(_selBank, RegRowStartCol(" Mel: ", _fRegBank, _fRegNumber)).Count : 0;
             int drmLines = showOrganPanel ? WrapRegisterNames(_selLiveDrmBank, RegRowStartCol(" Bic: ", _fLiveDrmBank, _fLiveDrmNumber)).Count : 0;
             int organRows = showOrganPanel ? (OrganBlankRows + midiPorts.Length + LiveTuningRows + LiveAjiRowCount() + melLines + drmLines) : 0;
-            int totalRows = staffRows + organRows;
+            int totalRows = staffRows + organRows + WidgetPreviewRows;   // krok76: zkušební náhled dole
             if (EnsureRows(HeaderRows + totalRows))
             {
                 RenderDashboard();
@@ -2030,6 +2465,8 @@ namespace PS150.UI.Windows
                 RenderRegRow(" Mel: ", _fRegBank, _fRegNumber, _selBank);
                 RenderRegRow(" Bic: ", _fLiveDrmBank, _fLiveDrmNumber, _selLiveDrmBank);
             }
+
+            RenderWidgetPreview();   // krok76: zkušební náhled spektra/EQ/mixpultu
         }
 
         /// <summary>
