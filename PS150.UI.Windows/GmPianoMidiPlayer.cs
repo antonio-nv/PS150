@@ -13,17 +13,21 @@ using PS150.Core.Sampler;   // krok18: Sf2MidiSynth, IMidiOut
 namespace PS150.UI.Windows
 {
     /// <summary>
-    /// Přehrává .mid soubory na PC přes vestavěný Windows syntezátor
-    /// "Microsoft GS Wavetable Synth" - natvrdo jako klavír (Acoustic Grand
-    /// Piano) na všech 16 kanálech, bez ohledu na to, jaký nástroj je uvedený
-    /// přímo v souboru (Program Change eventy ze souboru se ignorují).
+    /// Přehrává .mid soubory na PC přes VLASTNÍ zvukové enginy - vzorkované
+    /// (Sf2MidiSynth, SF2 banky jako MuseScore_General) i syntetizované
+    /// (OplMidiSynth - OPL3/SoundBlaster emulace, SyntheticMidiSynth - vlastní
+    /// syntéza přes ToneEngine). Tón (netbicí kanály) a bicí (kanál D10) mají
+    /// každý SVOU nezávisle vybranou banku, viz AvailablePlaybackBanks/
+    /// AvailableDrumBanks, spojené přes DualEngineMidiOut.
     ///
-    /// Kanál č. 10 (index 9) je podle standardu General MIDI vždy bicí -
-    /// to zajišťuje sám syntezátor (Microsoft GS Wavetable Synth), ne tento
-    /// kód. I když mu pošleme "Program Change = klavír" stejně jako všem
-    /// ostatním kanálům, na kanálu 10 to interpretuje jako výběr bicí
-    /// soupravy, ne nástroje - proto rytmika hraje správně bicími zvuky bez
-    /// jakéhokoliv filtrování z naší strany.
+    /// krok102: dřívější záloha na vestavěný Windows syntezátor "Microsoft GS
+    /// Wavetable Synth" (GM, banka _002_GeneralMIDI, celá cesta GsWavetableOut/
+    /// SharedGmOutput) byla na výslovné přání uživatele ZRUŠENA - vyžadovala
+    /// příliš mnoho výjimek pro provoz (sdílené spojení kvůli omezení "jen
+    /// jeden handle najednou", viz historický krok64) a jako externí OS
+    /// zařízení by šla měřit/mixovat jedině přes WASAPI loopback. Když se
+    /// nepodaří vytvořit žádný z vlastních enginů, přehrávání souboru teď
+    /// rovnou selže (PlaybackFailed), místo tichého skoku na Windows.
     ///
     /// DŮLEŽITÉ: Tahle třída je záměrně úplně oddělená od PS150.Core
     /// (ToneEngine / InputManager / AudioEngine). Core zůstává nedotčený a dál
@@ -50,8 +54,6 @@ namespace PS150.UI.Windows
     /// </summary>
     public class GmPianoMidiPlayer : IDisposable
     {
-        private const string DeviceName = "Microsoft GS Wavetable Synth";
-
         // Číslo nástroje se posílá po drátě jako hodnota 0-127 (Program Change).
         // Tištěné tabulky GM nástrojů bývají číslované 1-128 pro lidi ("č. 1 =
         // Acoustic Grand Piano"), ale fyzicky se posílá 0 - takže hodnota 0 je
@@ -66,38 +68,34 @@ namespace PS150.UI.Windows
 
         // krok28: čísla bank použitelných jako CELÝ engine pro přehrávání .mid
         // souborů (musí v sobě mít klavír B000:P000 + bicí B128:P000, jinak
-        // Sf2MidiSynth.TryCreate vrátí null a použije se GS Wavetable záloha
-        // níž). Úmyslně oddělené od PS150.Core.Banks.BankTable (to je číselník
-        // rejstříků živých varhan, ne přehrávacích enginů) - až přibude další
-        // skutečně funkční engine (např. OPL/SoundBlaster), stačí ho sem přidat.
-        // krok33: přidána _002_GeneralMIDI (stará dobrá GM banka) - dřív tu
-        // byla jen MuseScore_General, takže se na GM nedalo přepnout (ani
-        // šipkami/kolečkem - StepInList neměla kam skočit - ani ručně zadaným
-        // číslem natrvalo: zůstalo by to jen do příštího startu aplikace, pak
-        // by to tahle kontrola v FileBrowserWindow tiše vrátila zpátky
-        // na první dostupnou banku).
+        // Sf2MidiSynth.TryCreate vrátí null). Úmyslně oddělené od
+        // PS150.Core.Banks.BankTable (to je číselník rejstříků živých varhan,
+        // ne přehrávacích enginů) - až přibude další skutečně funkční engine,
+        // stačí ho sem přidat.
         // krok35: přidána _008_SoundBlaster (OPL3 emulace přes .op2/GENMIDI banku,
-        // viz OplMidiSynth/OplGenMidiPath níž) - třetí možnost vedle MuseScore/GM.
+        // viz OplMidiSynth/OplGenMidiPath níž).
         // krok41: přidána _001_SyntetickeZvuky - vlastní syntéza (ToneEngine),
-        // viz SyntheticMidiSynth. Na rozdíl od ostatních tří bank výš je tahle
-        // jen TÓNOVÁ (žádné "univerzální GM" bicí uvnitř), proto je jen tady,
+        // viz SyntheticMidiSynth. Na rozdíl od ostatních bank výš je tahle jen
+        // TÓNOVÁ (žádné "univerzální GM" bicí uvnitř), proto je jen tady,
         // ne v AvailableDrumBanks níž.
+        // krok102: _002_GeneralMIDI (GM, Microsoft GS Wavetable Synth) ODEBRÁNA
+        // na výslovné přání uživatele - banka i celá záložní cesta na Windows
+        // syntezátor (GsWavetableOut/SharedGmOutput) byly smazané, viz PlayAsync.
         public static readonly int[] AvailablePlaybackBanks =
         {
             PS150.Core.Banks._003_MuseScore_General.Number,
-            PS150.Core.Banks._002_GeneralMIDI.Number,
             PS150.Core.Banks._008_SoundBlaster.Number,
             PS150.Core.Banks._001_SyntetickeZvuky.Number,
         };
 
         // krok30: totéž, ale pro kanál D10 (bicí) ZVLÁŠŤ - viz DualEngineMidiOut.
-        // krok33/35: stejné tři banky jako výš. krok41: + _009_SynteticBici -
-        // vlastní bicí syntéza (ToneEngine.DrumRegister), jen BICÍ (žádné tóny),
-        // proto je jen tady, ne v AvailablePlaybackBanks výš.
+        // krok41: + _009_SynteticBici - vlastní bicí syntéza
+        // (ToneEngine.DrumRegister), jen BICÍ (žádné tóny), proto je jen tady,
+        // ne v AvailablePlaybackBanks výš.
+        // krok102: _002_GeneralMIDI (GM) odebrána - viz komentář výš.
         public static readonly int[] AvailableDrumBanks =
         {
             PS150.Core.Banks._003_MuseScore_General.Number,
-            PS150.Core.Banks._002_GeneralMIDI.Number,
             PS150.Core.Banks._008_SoundBlaster.Number,
             PS150.Core.Banks._009_SynteticBici.Number,
         };
@@ -622,9 +620,9 @@ namespace PS150.UI.Windows
         /// <summary>
         /// krok46: VU metr pro .mid přehrávání - průchoz na aktuální
         /// _outputDevice (Sf2MidiSynth/OplMidiSynth/SyntheticMidiSynth přes
-        /// DualEngineMidiOut, viz IProvidesAudioMeter). Záložní Windows
-        /// syntezátor (GsWavetableOut) tohle neumí - vrátí tiše (0,0)/false,
-        /// stejně jako dřív nebylo co měřit.
+        /// DualEngineMidiOut, viz IProvidesAudioMeter). krok102: dřívější
+        /// záložní Windows syntezátor, který tohle neuměl měřit vůbec, byl
+        /// zrušen - teď měří vždycky (všechny zbývající enginy jsou vlastní).
         /// </summary>
         public (float left, float right) ReadPeakLevels() =>
             (_outputDevice as PS150.Core.Sampler.IProvidesAudioMeter)?.ReadPeakLevels() ?? (0f, 0f);
@@ -643,27 +641,17 @@ namespace PS150.UI.Windows
         // panorámy po resetu ze souboru (viz ReassertChannelState).
         private volatile int[] _usedChannelsForPan = Array.Empty<int>();
 
-        // krok18: výstup přehrávače .mid. Natvrdo vlastní sampler (klavír + bicí z banky MuseScore_General,
-        // viz Sf2MidiSynth); když banka ještě není načtená, zůstává záloha Microsoft GS Wavetable Synth.
+        // krok18: výstup přehrávače .mid. Natvrdo vlastní sampler (klavír + bicí
+        // z banky MuseScore_General, viz Sf2MidiSynth).
+        // krok102: dřívější záloha "Microsoft GS Wavetable Synth" (GsWavetableOut)
+        // byla ZRUŠENA - viz komentář u PlayAsync. Když se žádnou skutečnou banku
+        // nepodaří vytvořit, přehrávání teď rovnou selže, místo tichého skoku na
+        // Windows syntezátor.
         private IMidiOut? _outputDevice;
 
         /// <summary>krok20: popis aktuálního zdroje zvuku pro obrazovku (zůstává i po doznění skladby).</summary>
         public string OutputDescription { get; private set; } = "MIDI";
 
-        /// <summary>
-        /// krok18: obal Windows syntezátoru jako IMidiOut (záloha, dokud se banka nenačte).
-        /// krok64: eventy jdou přes SharedGmOutput (JEDNO sdílené spojení pro
-        /// celou appku, viz tamní komentář - dřív si tenhle přehrávač otvíral
-        /// vlastní OutputDevice, což při souběhu s živým hraním na bance 002
-        /// shazovalo appku). Dispose() je proto záměrně prázdný - sdílené
-        /// zařízení nepatří jen tomuhle přehrávání, nezavírá se.
-        /// </summary>
-        private sealed class GsWavetableOut : IMidiOut
-        {
-            public string Description => "Microsoft GS Wavetable Synth (záloha)";
-            public void SendEvent(MidiEvent midiEvent) => SharedGmOutput.SendEvent(midiEvent);
-            public void Dispose() { }
-        }
         private CancellationTokenSource? _cts;
         private Task? _playbackTask;
         private Playback? _playback;
@@ -767,29 +755,24 @@ namespace PS150.UI.Windows
                     _outputDevice = null;
                 }
 
-                // ... a když ani jedna banka ještě není načtená, záloha: Windows syntezátor jako dřív.
+                // krok102: dřívější záloha na GM (Windows "Microsoft GS Wavetable
+                // Synth", viz smazané GsWavetableOut/SharedGmOutput) byla ZRUŠENA -
+                // uživatel ji nechtěl dál udržovat (vyžadovala vlastní sdílené
+                // spojení kvůli omezení "jen jeden handle najednou", viz krok64, a
+                // nešla by vůbec měřit/mixovat bez WASAPI loopbacku). Když se tedy
+                // ani jednu banku (tón/bicí) nepodaří vytvořit, přehrávání souboru
+                // teď rovnou SELŽE (PlaybackFailed, viz catch níž) - ať je hned
+                // vidět PROČ, místo tichého skoku na Windows syntezátor.
                 if (_outputDevice == null)
                 {
-                    // krok64: SharedGmOutput místo vlastního OutputDevice.GetByName - viz
-                    // komentář u GsWavetableOut/SharedGmOutput.
-                    var gs = SharedGmOutput.TryGet();
-                    if (gs == null)
-                    {
-                        throw new InvalidOperationException(
-                            $"Výstupní zařízení '{DeviceName}' nebylo na tomto PC nalezeno.");
-                    }
-                    _outputDevice = new GsWavetableOut();
+                    var reasons = new List<string>();
+                    if (tonalError != null) reasons.Add($"tón: {tonalError}");
+                    if (drumError != null) reasons.Add($"bicí: {drumError}");
+                    string detail = reasons.Count > 0 ? string.Join("; ", reasons) : "banka/soubor zatím není k dispozici";
+                    throw new InvalidOperationException($"Nepodařilo se vytvořit žádný přehrávací engine ({detail}).");
                 }
 
-                // krok43: když došlo na zálohu KVŮLI výjimce (ne kvůli běžnému
-                // "soubor/banka ještě nejsou k dispozici"), připíšeme k popisku
-                // i hlášku té výjimky - ať je vidět proč, místo tichého fallbacku.
-                var engineErrors = new List<string>();
-                if (tonalError != null) engineErrors.Add($"tón: {tonalError}");
-                if (drumError != null) engineErrors.Add($"bicí: {drumError}");
-                OutputDescription = engineErrors.Count > 0
-                    ? $"{_outputDevice.Description} [{string.Join("; ", engineErrors)}]"
-                    : _outputDevice.Description;
+                OutputDescription = _outputDevice.Description;
 
                 // NOVÉ: tolerantní čtení - některé (hlavně herní) .mid soubory mají
                 // v řídicí události hodnotu mimo rozsah 0-127 (např. 128). DryWetMidi

@@ -38,13 +38,10 @@
         public static readonly BankInfo Info = new BankInfo(Number, "Synth", BankKind.Synthetic, "Melzer 1-200 podle hracího stolu (fotky IMG_1744-1747), dále 200-202 klavíry, 300 cembalo, 400 zvon Zikmund, 500/501 aditivní, 600 smyčce. Bicí viz banka 9.");
     }
 
-    /// <summary>Banka 2 - General MIDI (Microsoft GS Wavetable). Programy 1-128 podle GM; zatím hraje jen přehrávač .mid.</summary>
-    public static class _002_GeneralMIDI
-    {
-        public const int Number = 2;
-        // krok53: Name zkrácen na krátký kód.
-        public static readonly BankInfo Info = new BankInfo(Number, "GM", BankKind.Planned, "Programy 1-128 podle GM; zatím hraje jen přehrávač .mid.");
-    }
+    // krok102: Banka 2 - General MIDI (Microsoft GS Wavetable) byla ZRUŠENA na
+    // výslovné přání uživatele - celá cesta na Windows syntezátor (GsWavetableOut/
+    // SharedGmOutput, .mid přehrávač i živé hraní) byla smazaná, viz komentář
+    // u PlayAsync v GmPianoMidiPlayer.cs. Číslo 2 zůstává prázdné (nepoužité).
 
     /// <summary>Banka 3 - MuseScore_General (SF2). Bank/program podle B000-B128 z dokumentace banky; přehrávač SF2 bude až v dalším kroku.</summary>
     public static class _003_MuseScore_General
@@ -112,7 +109,6 @@
         public static readonly BankInfo[] All =
         {
             _001_SyntetickeZvuky.Info,
-            _002_GeneralMIDI.Info,
             _003_MuseScore_General.Info,
             _004_Burea_Funeral_Chapel.Info,
             _005_Burea_Church_Ext.Info,

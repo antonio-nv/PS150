@@ -20,12 +20,12 @@
         AdditiveString, // Provizorní aditivní (alikvotová) struna - viz AdditiveStringVoice.cs
         Drums,          // Bicí GM (35-81) - viz DrumVoice.cs a DrumParameter níž
         Sample,         // krok17: vzorky ze SF2 - viz SampleVoice.cs
-        External        // krok58/61: banka 8 (OPL3) i banka 2 (GsWavetableOut/Windows GM) -
-                         // skutečný zvuk hraje MIMO ToneEngine (živý OplMidiSynth / Windows
-                         // "Microsoft GS Wavetable Synth", viz AudioEngine.AttachLiveOpl a
+        External        // krok58: banka 8 (OPL3) - skutečný zvuk hraje MIMO ToneEngine
+                         // (živý OplMidiSynth, viz AudioEngine.AttachLiveOpl a
                          // RegisterExclusiveBank), tenhle hlas (SilentVoice) jen drží místo
                          // v _activeNotes, ať jde rejstřík zapnout/vypnout a zobrazit
-                         // stejně jako ostatní.
+                         // stejně jako ostatní. krok102: dřívější druhé použití (banka 2,
+                         // Windows GM) bylo zrušeno.
     }
 
     // Kterou ze dvou metod má DrumVoice použít pro daný bicí zvuk (viz DrumParameter).

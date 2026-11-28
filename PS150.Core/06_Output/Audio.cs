@@ -20,18 +20,19 @@ namespace PS150.Core.Output
         private float[] _liveOplBuffer = Array.Empty<float>();
 
         // krok61: banky, které (na rozdíl od Organ/SF2) hrají úplně MIMO ToneEngine
-        // a navíc umí mít najednou aktivní jen JEDEN program (OPL3 čip / Windows
-        // GS Wavetable, obojí přes jeden pevný MIDI kanál) - viz ToggleRegister
-        // níž. Klíč = číslo banky, hodnota = "nastav tenhle program" (0 = žádný/
-        // vypnuto). Naplňuje se zvenčí (App.xaml.cs) přes RegisterExclusiveBank,
-        // AudioEngine sám neví nic o OplMidiSynth ani o Windows MIDI zařízeních.
+        // a navíc umí mít najednou aktivní jen JEDEN program (OPL3 čip, přes jeden
+        // pevný MIDI kanál) - viz ToggleRegister níž. Klíč = číslo banky, hodnota =
+        // "nastav tenhle program" (0 = žádný/vypnuto). Naplňuje se zvenčí
+        // (App.xaml.cs) přes RegisterExclusiveBank, AudioEngine sám neví nic o
+        // OplMidiSynth. krok102: druhá dřívější banka tohoto typu (2, Windows GM)
+        // byla zrušena - mechanismus samotný je ale obecný, zůstává beze změny.
         private readonly Dictionary<int, Action<int>> _exclusiveBankProgram = new Dictionary<int, Action<int>>();
 
         /// <summary>krok61: zaregistruje banku s "jen jeden program najednou" chováním (viz _exclusiveBankProgram výš).</summary>
         public void RegisterExclusiveBank(int bankNumber, Action<int> setProgram) => _exclusiveBankProgram[bankNumber] = setProgram;
 
         // krok66: pro tvrdé přepnutí banky (viz KillRegister/HardSwitchMelodicBank níž) -
-        // u bank s vlastním živým enginem (OPL3/GM) nestačí poslat setProgram(0),
+        // u bank s vlastním živým enginem (OPL3) nestačí poslat setProgram(0),
         // protože to samo o sobě NEumlčí už rozeznělé hlasy v tom engine (jen zruší
         // vynucený program pro PŘÍŠTÍ notu). Klíč = číslo banky, hodnota = "umlč
         // OKAMŽITĚ VŠECHNO, co v tobě teď zní". Naplňuje se zvenčí (App.xaml.cs).
@@ -187,7 +188,7 @@ namespace PS150.Core.Output
 
         /// <summary>
         /// krok15: přepnutí rejstříku podle (banka, číslo).
-        /// krok58/61: banky z _exclusiveBankProgram (OPL3, Windows GM) jsou zvláštní
+        /// krok58: banky z _exclusiveBankProgram (OPL3) jsou zvláštní
         /// případ - skutečný zvuk nehraje ToneEngine, ale samostatné "živé" zařízení,
         /// které navíc (na rozdíl od Organ/SF2 rejstříků) umí mít najednou zapnutý
         /// jen JEDEN program. Zapnutí rejstříku z takové banky proto nejdřív vypne

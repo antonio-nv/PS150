@@ -3,9 +3,8 @@ using PS150.Core.Generators;
 using PS150.Core.Input;      // Pro InputManager
 using PS150.Core.Output;
 using PS150.Core.ToneEngine; // TONEENGINE
-using Melanchall.DryWetMidi.Core;         // krok58: NoteOnEvent/NoteOffEvent pro živé OPL3/GM
+using Melanchall.DryWetMidi.Core;         // krok58: NoteOnEvent/NoteOffEvent pro živé OPL3
 using Melanchall.DryWetMidi.Common;       // krok58: SevenBitNumber/FourBitNumber
-using Melanchall.DryWetMidi.Multimedia;   // krok61: OutputDevice pro živou banku 2 (Windows GM)
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -79,7 +78,7 @@ namespace PS150.UI.Windows
         private ToneEngine? _toneEngine;
         private AudioEngine? _audioEngine;
         private PS150.Core.Sampler.OplMidiSynth? _liveOpl;   // krok58: banka 8 pro živé hraní
-        private OutputDevice? _liveGm;                       // krok61/64: banka 2 pro živé hraní, viz SharedGmOutput
+        // krok102: _liveGm (banka 2, Windows GM) byla zrušena - viz komentář u PlayAsync v GmPianoMidiPlayer.cs.
 
         // Statická reference, aby k aktuálnímu AudioEngine (varhany) mohly
         // přistoupit i jiné statické třídy jako VgaEngine (pro VU metr).
@@ -218,37 +217,10 @@ namespace PS150.UI.Windows
                 }
             }
 
-            // krok61: banka 2 (GsWavetableOut/Windows "Microsoft GS Wavetable Synth") pro
-            // ŽIVÉ hraní - na rozdíl od banky 8 tu NENÍ co mixovat do AudioEngine.Read(),
-            // Windows si tenhle zvuk hraje úplně sám, mimo náš mixážní pult.
-            // krok64: PŮVODNĚ si tu appka otvírala DRUHÉ, nezávislé spojení na totéž
-            // zařízení jako přehrávač .mid (GmPianoMidiPlayer) - přesně riziko, na které
-            // jsem v krok61 upozorňoval, se potvrdilo (crash.log: MidiDeviceException
-            // "Device is already in use"). Teď jde přes SharedGmOutput - JEDNO sdílené
-            // spojení pro celou appku, viz tamní komentář.
-            try
-            {
-                _liveGm = SharedGmOutput.TryGet();
-                int gmCount = ToneEngine.RegisterGeneralMidiBank(PS150.Core.Banks._002_GeneralMIDI.Number);
-                _audioEngine.RegisterExclusiveBank(
-                    PS150.Core.Banks._002_GeneralMIDI.Number,
-                    program =>
-                    {
-                        if (_liveGm == null || program == 0) return;
-                        SharedGmOutput.SendEvent(new ProgramChangeEvent((SevenBitNumber)(program - 1)) { Channel = (FourBitNumber)0 });
-                    });
-                // krok66: tvrdé přepnutí banky - MIDI CC 120 "All Sound Off" umlčí na
-                // kanálu 0 OKAMŽITĚ VŠECHNO bez ohledu na Release (na rozdíl od CC 123
-                // "All Notes Off", který by případné dozvuky ještě nechal doznít).
-                _audioEngine.RegisterHardStop(
-                    PS150.Core.Banks._002_GeneralMIDI.Number,
-                    () => SharedGmOutput.SendEvent(new ControlChangeEvent((SevenBitNumber)120, (SevenBitNumber)0) { Channel = (FourBitNumber)0 }));
-                Debug.WriteLine($"[App] Živé GM (Windows): {gmCount} rejstříků");
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[App] Živé GM (Windows) se nepodařilo otevřít: {ex.Message}");
-            }
+            // krok102: dřívější živé GM (banka 2, Windows "Microsoft GS Wavetable
+            // Synth" přes SharedGmOutput) bylo na výslovné přání uživatele ZRUŠENO -
+            // viz podrobné zdůvodnění v GmPianoMidiPlayer.cs u PlayAsync. Veškerý
+            // další vývoj (zpracování/syntéza/analýza) se teď soustředí jinam.
 
             // krok17/19: banky SF2 se načítají na pozadí (program mezitím hraje syntetické zvuky).
             // NATVRDO ze složky "sf2" vedle exe (nezávisle na settings.json): 003 MuseScore_General, 005 Bureå Church Ext.
@@ -314,19 +286,8 @@ namespace PS150.UI.Windows
                     _liveOpl.SendEvent(oplEvent);
                 }
 
-                // krok61/65: totéž pro banku 2 (Windows GM) - program (nástroj) se nastavuje
-                // jen při zapnutí/vypnutí rejstříku (viz AudioEngine.RegisterExclusiveBank
-                // v OnStartup), tady jde jen samotná nota. NoteOff zase posíláme vždycky -
-                // viz komentář u banky 8 výš, stejný zádrhel platí identicky i tady.
-                if (_liveGm != null && evt.Channel != ToneEngine.DrumChannel
-                    && (!isNoteOn || (OrganEngine?.ActiveRegisters.Any(r => r.Bank == PS150.Core.Banks._002_GeneralMIDI.Number) ?? false)))
-                {
-                    ChannelEvent gmEvent = isNoteOn
-                        ? new NoteOnEvent((SevenBitNumber)evt.Note.Number, (SevenBitNumber)Math.Clamp((int)Math.Round(evt.Velocity * 127), 1, 127))
-                        : new NoteOffEvent((SevenBitNumber)evt.Note.Number, (SevenBitNumber)0);
-                    gmEvent.Channel = (FourBitNumber)0;
-                    SharedGmOutput.SendEvent(gmEvent);
-                }
+                // krok102: dřívější stejný blok pro banku 2 (Windows GM) byl zrušen -
+                // viz komentář u OnStartup výš.
 
                 Debug.WriteLine($"[{evt.Source}] {evt.Type} | Nota: {evt.Note.Number} ({evt.Note.FrequencyHz:F1} Hz)");
             };

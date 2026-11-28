@@ -341,31 +341,10 @@ namespace PS150.Core.ToneEngine
             return count;
         }
 
-        /// <summary>
-        /// krok61: obdoba RegisterOp2Bank, ale pro banku 2 (GsWavetableOut/Windows
-        /// "Microsoft GS Wavetable Synth"). Na rozdíl od OPL3 tahle banka vůbec
-        /// neprozradí svoje nástroje (je to jen průchod na Windows), takže jména
-        /// berem z GeneralMidiNames - žádné tajemství, standardní seznam MMA (viz
-        /// komentář tam). Presety dostanou InstrumentType.External (viz
-        /// SilentVoice) - skutečný zvuk jde přímo na Windows zařízení, mimo
-        /// ToneEngine (viz AudioEngine.RegisterExclusiveBank).
-        /// </summary>
-        public static int RegisterGeneralMidiBank(int bankNumber)
-        {
-            int count = 0;
-            for (int i = 0; i < GeneralMidiNames.Melodic.Length; i++)
-            {
-                int number = i + 1;   // GM program 1-128, stejná konvence jako v Rej
-                var preset = new VoicePreset
-                {
-                    Name = GeneralMidiNames.Melodic[i],
-                    Number = number,
-                    Instrument = InstrumentType.External
-                };
-                if (_presetRegistry.TryAdd(new RegisterId(bankNumber, number), preset)) count++;
-            }
-            return count;
-        }
+        // krok102: RegisterGeneralMidiBank (banka 2, Windows GM) a pomocná
+        // GeneralMidiNames.cs byly smazané - viz komentář u PlayAsync v
+        // GmPianoMidiPlayer.cs. RegisterOp2Bank výš (banka 8, OPL3) zůstává,
+        // ta na Windows nijak nezávisí.
 
         // krok16: dotazy na registr pro formulář (banky, čísla rejstříků v bance, jméno rejstříku).
 
