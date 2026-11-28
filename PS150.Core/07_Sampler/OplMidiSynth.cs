@@ -168,6 +168,27 @@ namespace PS150.Core.Sampler
         /// </summary>
         public static OplMidiSynth? TryCreate(string op2Path, bool isDrumEngine, int universalProgram = 1)
         {
+            var synth = TryCreateForMixing(op2Path, isDrumEngine, universalProgram);
+            if (synth == null) return null;
+
+            synth._waveOut = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 4 };
+            synth._waveOut.Init(new SampleToWaveProvider16(synth));
+            synth._waveOut.Play();
+            return synth;
+        }
+
+        /// <summary>
+        /// krok104: stejné jako TryCreate výš, ale BEZ vlastního WaveOutEvent -
+        /// pro .mid přehrávač (GmPianoMidiPlayer), který teď VŠECHNY enginy
+        /// (tónový i bicí) spojuje do JEDNOHO sdíleného výstupu přes
+        /// mixpult+ekvalizér (viz PS150.Core.Mixers.SummingSampleProvider a
+        /// StereoMonoChannelSampleProvider). Na rozdíl od CreateForLiveMixing
+        /// (ta bere už NAČTENOU banku, pro živé hraní) tahle bere CESTU k .op2
+        /// souboru, stejně jako TryCreate - pro přehrávání .mid souborů totiž
+        /// žádná sdílená, předem načtená banka k dispozici není.
+        /// </summary>
+        public static OplMidiSynth? TryCreateForMixing(string op2Path, bool isDrumEngine, int universalProgram = 1)
+        {
             Op2Bank bank;
             try { bank = Op2Bank.Load(op2Path); }
             catch { return null; }
@@ -175,10 +196,6 @@ namespace PS150.Core.Sampler
             string description = $"{System.IO.Path.GetFileNameWithoutExtension(op2Path)} (OPL3{(isDrumEngine ? ", bicí" : "")})";
             var synth = new OplMidiSynth(bank, isDrumEngine, description);
             if (!isDrumEngine) synth.SetUniversalProgram(universalProgram);
-
-            synth._waveOut = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 4 };
-            synth._waveOut.Init(new SampleToWaveProvider16(synth));
-            synth._waveOut.Play();
             return synth;
         }
 

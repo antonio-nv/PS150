@@ -18,6 +18,7 @@ using PS150.Core.Input;
 using PS150.Core.Network;
 using PS150.Core.Tones;
 using PS150.Core.Mixers;       // krok92: MonoChannel (meze Gain/EQ pro skutečně napojený mixpult)
+using PS150.Core.Equalizers;   // krok105: GraphicEqualizer32Band, SpectrumAnalyzer32Band (Active*Eq32/Active*Analyzer32)
 
 namespace PS150.UI.Windows
 {
@@ -108,6 +109,41 @@ namespace PS150.UI.Windows
         private int _volume = 80;
         private bool _isPaused = false;
         private bool _isMidiMode = false;
+
+        // ==================================================================
+        // krok105: sjednocený mixpult/EQ/analyzér - funguje stejně pro živé
+        // hraní (App.OrganEngine, mono), .mid soubory (_midiPlayer, stereo od
+        // kroku 104) i .mp3/ostatní zvuky (_audioPlayer, stereo). Dřív tahle
+        // pole mířila NATVRDO na _audioPlayer, takže živé hraní i .mid
+        // zůstávaly úplně bez mixpultu/EQ v obrazovce (i když vzadu v DSP už
+        // od kroku 103/104 fungovaly) - viz ApplyActiveBandTable/
+        // RenderWidgetPreview níž pro skutečné použití.
+        // ==================================================================
+
+        /// <summary>Stejná podmínka, jakou si dřív RenderDashboard/RenderWidgetPreview počítaly zvlášť pro sebe - .mid soubor hraje, dokud není na pauze; cokoliv jiného (.mp3) podle AudioPlayer.IsPlaying.</summary>
+        private bool IsActuallyPlaying => _isMidiMode ? !_midiPlayer.IsPaused : _audioPlayer.IsPlaying;
+
+        /// <summary>Živé hraní je AKTIVNÍ REŽIM mixpultu/EQ přesně tehdy, kdy se dřív zobrazoval varhanní panel (showOrganPanel v RenderDashboard) - připojená MIDI klávesnice a zrovna nehraje žádný soubor.</summary>
+        private bool IsLiveModeActive => (App.Input?.IsLiveDeviceConnected ?? false) && !IsActuallyPlaying;
+
+        /// <summary>.mid soubory jedou přes GmPianoMidiPlayer (stereo, od kroku 104), cokoliv jiného (dnes .mp3) přes AudioPlayer - obojí implementuje IStereoDspSource stejně (viz ten soubor).</summary>
+        private IStereoDspSource ActiveStereoSource => _isMidiMode ? _midiPlayer : _audioPlayer;
+
+        /// <summary>
+        /// Mono/stereo zdroj mixpultu/EQ/analyzéru PODLE AKTUÁLNÍHO REŽIMU: při
+        /// živém hraní ActiveLeft i ActiveRight míří na STEJNOU instanci
+        /// (App.OrganEngine.LiveChannel - je to jen jeden mono kanál), takže
+        /// zápis "stejná hodnota na levý i pravý" (viz mixpultová pole níž) v
+        /// živém režimu jen dvakrát (neškodně) nastaví to samé. Při přehrávání
+        /// souboru jde o dvě SKUTEČNĚ nezávislé instance (ActiveStereoSource.
+        /// Left/RightChannelStrip).
+        /// </summary>
+        private MonoChannel? ActiveLeft => IsLiveModeActive ? App.OrganEngine?.LiveChannel : ActiveStereoSource.LeftChannelStrip;
+        private MonoChannel? ActiveRight => IsLiveModeActive ? App.OrganEngine?.LiveChannel : ActiveStereoSource.RightChannelStrip;
+        private GraphicEqualizer32Band? ActiveLeftEq32 => IsLiveModeActive ? App.OrganEngine?.LiveEq32 : ActiveStereoSource.LeftEq32;
+        private GraphicEqualizer32Band? ActiveRightEq32 => IsLiveModeActive ? App.OrganEngine?.LiveEq32 : ActiveStereoSource.RightEq32;
+        private SpectrumAnalyzer32Band? ActiveLeftAnalyzer32 => IsLiveModeActive ? App.OrganEngine?.LiveAnalyzer32 : ActiveStereoSource.LeftAnalyzer32;
+        private SpectrumAnalyzer32Band? ActiveRightAnalyzer32 => IsLiveModeActive ? App.OrganEngine?.LiveAnalyzer32 : ActiveStereoSource.RightAnalyzer32;
 
         // krok95: viditelnost 32pásmového ekvalizéru (mono i stereo formulář)
         // přepíná klávesa E (viz HandleInput) - ve výchozím stavu schovaný, ať
@@ -208,6 +244,16 @@ namespace PS150.UI.Windows
         private FormField _fDemoFader = null!;
         private readonly FormField[] _fDemoMixerFields = new FormField[8];
         private static readonly string[] DemoMixerFieldNames = { "Gain", "Pan", "Gate", "Comp", "HPF", "E.Ga", "E.Q", "E.Fr" };
+
+        // krok106: na uživatelovo přání PRAVÝ kanál jako DRUHÝ, nezávislý
+        // mixpultový pás (dřív jeden řádek vždycky nastavoval L i P najednou -
+        // "na zkoušení, ukazování a vývoj" teď existují doopravdy DVA mono
+        // pásy vedle sebe, viz RenderWidgetPreview). Stejný princip/stejná pole
+        // jako u levého kanálu výš, jen napojené na ActiveRight místo ActiveLeft.
+        private double _demoFaderDbR = -6.0;
+        private readonly double[] _demoMixerFieldR = { 0.0, 0.0, -120.0, 0.0, 0.0, 0.0, 1.0, 1000.0 };
+        private FormField _fDemoFaderR = null!;
+        private readonly FormField[] _fDemoMixerFieldsR = new FormField[8];
 
         // krok80: 32 pásem ekvalizéru - PŮVODNĚ (krok79) ISO třetinooktávová řada
         // (decimální "pěkná čísla" 20, 25, 31.5, 40... - průmyslový akustický standard
@@ -899,6 +945,17 @@ namespace PS150.UI.Windows
                     _ = _midiPlayer.PlayAsync(currentFile);
                     _midiPlayer.SetVolume(_volume);
                     _midiPlayer.SetDrumsEnabled(_settings.DrumsEnabled);
+
+                    // krok105: stejný důvod jako u _audioPlayer.Load() níž -
+                    // PlayAsync vytváří StereoMonoChannelSampleProvider (a tedy
+                    // i LeftEq32/RightEq32/LeftAnalyzer32/RightAnalyzer32) úplně
+                    // ZNOVA při každém spuštění .mid souboru. Bez tohohle
+                    // volání by ekvalizér/analyzér vždycky naskočily zpátky na
+                    // výchozí hudební tabulku, i kdyby uživatel předtím přepnul
+                    // na ISO (PlayAsync do bodu, kde se mixpult sestavuje, běží
+                    // čistě synchronně - viz komentář u GmPianoMidiPlayer.
+                    // PlayAsync - takže je tu hned bezpečné volat).
+                    ApplyActiveBandTable();
                 }
             }
             else
@@ -923,15 +980,19 @@ namespace PS150.UI.Windows
         }
 
         /// <summary>
-        /// krok99/101: pošle AKTUÁLNĚ vybranou tabulku kmitočtů (hudební/ISO, viz
-        /// _useIsoBands) a aktuální místo odběru analyzéru (za/před ekvalizérem,
-        /// viz _analyzerPreEq) do všech živých DSP objektů - ekvalizér i analyzér,
-        /// oba kanály. Volá se jak při přepnutí klávesou I/P, tak po načtení
-        /// nového souboru (viz UpdateFileTypeState výš - StereoMonoChannelSampleProvider
-        /// se vytváří úplně znovu při každém Load(), takže by jinak obojí vždy
-        /// naskočilo zpátky na výchozí nastavení). Bezpečné volat i když právě nic
-        /// stereo nehraje - LeftEq32/RightEq32/LeftAnalyzer32/RightAnalyzer32 jsou
-        /// pak null a ?. volání/AnalyzerTapPreEq setter se jen beze změny přeskočí.
+        /// krok99/101/105: pošle AKTUÁLNĚ vybranou tabulku kmitočtů (hudební/ISO,
+        /// viz _useIsoBands) a aktuální místo odběru analyzéru (za/před
+        /// ekvalizérem, viz _analyzerPreEq) do VŠECH živých DSP objektů - .mp3
+        /// (_audioPlayer), .mid (_midiPlayer, od kroku 104) i živé hraní
+        /// (App.OrganEngine, od kroku 103) - ekvalizér i analyzér, oba kanály
+        /// (u živého hraní je to jen jeden mono pár). Volá se jak při přepnutí
+        /// klávesou I/P, tak po načtení/spuštění nového souboru (viz
+        /// UpdateFileTypeState výš - StereoMonoChannelSampleProvider se
+        /// vytváří úplně znovu při každém Load()/PlayAsync(), takže by jinak
+        /// vždy naskočilo zpátky na výchozí nastavení). Bezpečné volat i když
+        /// zrovna nic z toho nehraje - LeftEq32/RightEq32/LeftAnalyzer32/
+        /// RightAnalyzer32/LiveEq32/LiveAnalyzer32 jsou pak null a ?. volání/
+        /// AnalyzerTapPreEq setter se jen beze změny přeskočí.
         /// </summary>
         private void ApplyActiveBandTable()
         {
@@ -943,8 +1004,20 @@ namespace PS150.UI.Windows
             _audioPlayer.RightEq32?.UseFrequencyTable(EqBandFreqHz);
             _audioPlayer.LeftAnalyzer32?.UseFrequencyTable(EqBandFreqHz);
             _audioPlayer.RightAnalyzer32?.UseFrequencyTable(EqBandFreqHz);
-
             _audioPlayer.AnalyzerTapPreEq = _analyzerPreEq;
+
+            _midiPlayer.LeftEq32?.UseFrequencyTable(EqBandFreqHz);
+            _midiPlayer.RightEq32?.UseFrequencyTable(EqBandFreqHz);
+            _midiPlayer.LeftAnalyzer32?.UseFrequencyTable(EqBandFreqHz);
+            _midiPlayer.RightAnalyzer32?.UseFrequencyTable(EqBandFreqHz);
+            _midiPlayer.AnalyzerTapPreEq = _analyzerPreEq;
+
+            if (App.OrganEngine != null)
+            {
+                App.OrganEngine.LiveEq32.UseFrequencyTable(EqBandFreqHz);
+                App.OrganEngine.LiveAnalyzer32.UseFrequencyTable(EqBandFreqHz);
+                App.OrganEngine.LiveAnalyzerTapPreEq = _analyzerPreEq;
+            }
         }
 
         /// <returns>false = má se okno zavřít (stejná konvence jako dřívější HandleInput(ConsoleKey) : bool v VgaEngine).</returns>
@@ -1046,15 +1119,19 @@ namespace PS150.UI.Windows
                     break;
 
                 case Key.P:
-                    // krok101: živě přepnout místo odběru SPEKTRÁLNÍHO ANALYZÉRU - před
+                    // krok101/105: živě přepnout místo odběru SPEKTRÁLNÍHO ANALYZÉRU - před
                     // ekvalizérem (nezpracovaný signál) / za ekvalizérem (výsledek EQ) -
                     // viz StereoMonoChannelSampleProvider.AnalyzerTapPreEq. DŮLEŽITÉ: tohle
                     // NEMĚNÍ, co HRAJE (výstup je vždycky za ekvalizérem) - jen co se
                     // MĚŘÍ/zobrazuje na metrech u jednotlivých pásem. Uživatel chtěl vidět
                     // u "hrůzostrašných" nastavení ekvalizéru i to, jak vypadal signál
-                    // předtím. _grid.Clear() pro jistotu (stejně jako u ostatních přepínačů).
+                    // předtím. krok105: ApplyActiveBandTable() nastaví přepínač na VŠECH
+                    // třech zdrojích (_audioPlayer/_midiPlayer/App.OrganEngine) najednou -
+                    // dřív se tu nastavoval jen _audioPlayer (.mp3), takže klávesa P u
+                    // živého hraní/.mid souborů fakticky nic neudělala.
+                    // _grid.Clear() pro jistotu (stejně jako u ostatních přepínačů).
                     _analyzerPreEq = !_analyzerPreEq;
-                    _audioPlayer.AnalyzerTapPreEq = _analyzerPreEq;
+                    ApplyActiveBandTable();
                     _grid.Clear();
                     break;
 
@@ -1479,22 +1556,23 @@ namespace PS150.UI.Windows
                 defaultValue: -6.0);
             _fDemoFader = _form.Add(pDemoFader);
 
-            // ---- krok92: napojení na skutečný MonoChannel (AudioPlayer.
-            // LeftChannelStrip/RightChannelStrip - krok88) - KAŽDÉ pole (kromě Pan)
-            // nastaví STEJNOU hodnotu na levém i pravém kanálu zároveň (stejně jako
-            // mono EQ formulář výš). Dokud nehraje žádný stereo soubor, jsou obě
-            // vlastnosti null - pole se pak chovají jako dřív, jen si pamatují
-            // poslední zadanou hodnotu (_demoMixerField), která se použije, jakmile
-            // se příští stereo soubor načte (viz BuildOutput). ----
+            // ---- krok92/106: napojení na skutečný MonoChannel (AudioPlayer/
+            // GmPianoMidiPlayer.LeftChannelStrip - krok88/104, App.OrganEngine.
+            // LiveChannel při živém hraní - krok105). Tohle je LEVÝ kanál - PRAVÝ
+            // má svou vlastní, NEZÁVISLOU sadu polí níž (_fDemoMixerFieldsR), na
+            // uživatelovo výslovné přání "opravdu dva mono, na zkoušení,
+            // ukazování a vývoj" (krok106) - dřív jeden řádek nastavoval L i P
+            // najednou, teď každý kanál svoje. Dokud nehraje žádný stereo zdroj
+            // ani živé hraní, je ActiveLeft null - pole se pak chovají jako dřív,
+            // jen si pamatují poslední zadanou hodnotu (_demoMixerField). ----
 
             var pGain = Parameter.Number(
                 "Gain", "dB", MonoChannel.MinGainDb, MonoChannel.MaxGainDb, 0, new[] { 1.0, 1.0, 5.0 },
-                () => _audioPlayer.LeftChannelStrip?.GainDb ?? _demoMixerField[0],
+                () => ActiveLeft?.GainDb ?? _demoMixerField[0],
                 v =>
                 {
                     _demoMixerField[0] = v;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.GainDb = v;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.GainDb = v;
+                    if (ActiveLeft != null) ActiveLeft.GainDb = v;
                 },
                 showSign: true,
                 defaultValue: 0.0);
@@ -1515,12 +1593,11 @@ namespace PS150.UI.Windows
 
             var pGate = Parameter.Number(
                 "Gate", "dB", -120, 0, 0, new[] { 1.0, 1.0, 10.0 },
-                () => _audioPlayer.LeftChannelStrip?.GateThresholdDb ?? _demoMixerField[2],
+                () => ActiveLeft?.GateThresholdDb ?? _demoMixerField[2],
                 v =>
                 {
                     _demoMixerField[2] = v;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.GateThresholdDb = v;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.GateThresholdDb = v;
+                    if (ActiveLeft != null) ActiveLeft.GateThresholdDb = v;
                 },
                 showSign: true,
                 defaultValue: -120.0);   // '*' vrátí na vypnuto
@@ -1528,12 +1605,11 @@ namespace PS150.UI.Windows
 
             var pComp = Parameter.Number(
                 "Comp", "dB", -40, 0, 0, new[] { 1.0, 1.0, 10.0 },
-                () => _audioPlayer.LeftChannelStrip?.CompThresholdDb ?? _demoMixerField[3],
+                () => ActiveLeft?.CompThresholdDb ?? _demoMixerField[3],
                 v =>
                 {
                     _demoMixerField[3] = v;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.CompThresholdDb = v;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.CompThresholdDb = v;
+                    if (ActiveLeft != null) ActiveLeft.CompThresholdDb = v;
                 },
                 showSign: true,
                 defaultValue: 0.0);   // '*' vrátí na vypnuto
@@ -1541,12 +1617,11 @@ namespace PS150.UI.Windows
 
             var pHpf = Parameter.Number(
                 "HPF", "Hz", 0, MonoChannel.MaxHpfCutoffHz, 0, new[] { 1.0, 5.0, 20.0 },
-                () => _audioPlayer.LeftChannelStrip?.HpfCutoffHz ?? _demoMixerField[4],
+                () => ActiveLeft?.HpfCutoffHz ?? _demoMixerField[4],
                 v =>
                 {
                     _demoMixerField[4] = v;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.HpfCutoffHz = v;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.HpfCutoffHz = v;
+                    if (ActiveLeft != null) ActiveLeft.HpfCutoffHz = v;
                 },
                 showSign: false,
                 defaultValue: 0.0);   // '*' vrátí na vypnuto (0 = beze změny, viz MonoChannel.HpfCutoffHz)
@@ -1554,12 +1629,11 @@ namespace PS150.UI.Windows
 
             var pEqGain = Parameter.Number(
                 "E.Ga", "dB", MonoChannel.MinEqGainDb, MonoChannel.MaxEqGainDb, 0, new[] { 1.0, 1.0, 5.0 },
-                () => _audioPlayer.LeftChannelStrip?.EqGainDb ?? _demoMixerField[5],
+                () => ActiveLeft?.EqGainDb ?? _demoMixerField[5],
                 v =>
                 {
                     _demoMixerField[5] = v;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.EqGainDb = v;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.EqGainDb = v;
+                    if (ActiveLeft != null) ActiveLeft.EqGainDb = v;
                 },
                 showSign: true,
                 defaultValue: 0.0);
@@ -1567,12 +1641,11 @@ namespace PS150.UI.Windows
 
             var pEqQ = Parameter.Number(
                 "E.Q", "", 0.1, 10.0, 1, new[] { 0.1, 0.1, 1.0 },
-                () => _audioPlayer.LeftChannelStrip?.EqQ ?? _demoMixerField[6],
+                () => ActiveLeft?.EqQ ?? _demoMixerField[6],
                 v =>
                 {
                     _demoMixerField[6] = v;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.EqQ = v;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.EqQ = v;
+                    if (ActiveLeft != null) ActiveLeft.EqQ = v;
                 },
                 showSign: false,
                 defaultValue: 1.0);
@@ -1586,17 +1659,127 @@ namespace PS150.UI.Windows
             // je i při psaní jasné, že "1.50" znamená 1500Hz, ne 1,5Hz.
             var pEqFreq = Parameter.Number(
                 "E.Fr", "k", MonoChannel.MinEqFreqHz / 1000.0, MonoChannel.MaxEqFreqHz / 1000.0, 2, new[] { 0.01, 0.1, 1.0 },
-                () => (_audioPlayer.LeftChannelStrip?.EqFreqHz ?? _demoMixerField[7]) / 1000.0,
+                () => (ActiveLeft?.EqFreqHz ?? _demoMixerField[7]) / 1000.0,
                 v =>
                 {
                     double hz = v * 1000.0;
                     _demoMixerField[7] = hz;
-                    if (_audioPlayer.LeftChannelStrip != null) _audioPlayer.LeftChannelStrip.EqFreqHz = hz;
-                    if (_audioPlayer.RightChannelStrip != null) _audioPlayer.RightChannelStrip.EqFreqHz = hz;
+                    if (ActiveLeft != null) ActiveLeft.EqFreqHz = hz;
                 },
                 showSign: false,
                 defaultValue: 1.0);   // 1,0k = 1000Hz, výchozí střed pásma MonoChannel.EqFreqHz
             _fDemoMixerFields[7] = _form.Add(pEqFreq);
+
+            // ---- krok106: DRUHÝ, nezávislý mixpultový pás - PRAVÝ kanál
+            // (ActiveRight). Úplně stejná pole/meze jako u levého výš, jen jiný
+            // zdroj. Při živém hraní ActiveLeft i ActiveRight míří na STEJNOU
+            // instanci (App.OrganEngine.LiveChannel - je to jeden mono kanál),
+            // takže obě sady polí v živém režimu ukazují/mění to samé (správně -
+            // je to fyzicky jeden kanál, jen zobrazený dvakrát). Při přehrávání
+            // souboru jde o dvě SKUTEČNĚ nezávislé instance. ----
+            var pGainR = Parameter.Number(
+                "Gain", "dB", MonoChannel.MinGainDb, MonoChannel.MaxGainDb, 0, new[] { 1.0, 1.0, 5.0 },
+                () => ActiveRight?.GainDb ?? _demoMixerFieldR[0],
+                v =>
+                {
+                    _demoMixerFieldR[0] = v;
+                    if (ActiveRight != null) ActiveRight.GainDb = v;
+                },
+                showSign: true,
+                defaultValue: 0.0);
+            _fDemoMixerFieldsR[0] = _form.Add(pGainR);
+
+            var pPanR = Parameter.Number(
+                "Pan", "", -99, 99, 0, new[] { 1.0, 1.0, 10.0 },
+                () => _demoMixerFieldR[1],
+                v => _demoMixerFieldR[1] = v,
+                showSign: true,
+                defaultValue: 0.0);
+            _fDemoMixerFieldsR[1] = _form.Add(pPanR);
+
+            var pGateR = Parameter.Number(
+                "Gate", "dB", -120, 0, 0, new[] { 1.0, 1.0, 10.0 },
+                () => ActiveRight?.GateThresholdDb ?? _demoMixerFieldR[2],
+                v =>
+                {
+                    _demoMixerFieldR[2] = v;
+                    if (ActiveRight != null) ActiveRight.GateThresholdDb = v;
+                },
+                showSign: true,
+                defaultValue: -120.0);
+            _fDemoMixerFieldsR[2] = _form.Add(pGateR);
+
+            var pCompR = Parameter.Number(
+                "Comp", "dB", -40, 0, 0, new[] { 1.0, 1.0, 10.0 },
+                () => ActiveRight?.CompThresholdDb ?? _demoMixerFieldR[3],
+                v =>
+                {
+                    _demoMixerFieldR[3] = v;
+                    if (ActiveRight != null) ActiveRight.CompThresholdDb = v;
+                },
+                showSign: true,
+                defaultValue: 0.0);
+            _fDemoMixerFieldsR[3] = _form.Add(pCompR);
+
+            var pHpfR = Parameter.Number(
+                "HPF", "Hz", 0, MonoChannel.MaxHpfCutoffHz, 0, new[] { 1.0, 5.0, 20.0 },
+                () => ActiveRight?.HpfCutoffHz ?? _demoMixerFieldR[4],
+                v =>
+                {
+                    _demoMixerFieldR[4] = v;
+                    if (ActiveRight != null) ActiveRight.HpfCutoffHz = v;
+                },
+                showSign: false,
+                defaultValue: 0.0);
+            _fDemoMixerFieldsR[4] = _form.Add(pHpfR);
+
+            var pEqGainR = Parameter.Number(
+                "E.Ga", "dB", MonoChannel.MinEqGainDb, MonoChannel.MaxEqGainDb, 0, new[] { 1.0, 1.0, 5.0 },
+                () => ActiveRight?.EqGainDb ?? _demoMixerFieldR[5],
+                v =>
+                {
+                    _demoMixerFieldR[5] = v;
+                    if (ActiveRight != null) ActiveRight.EqGainDb = v;
+                },
+                showSign: true,
+                defaultValue: 0.0);
+            _fDemoMixerFieldsR[5] = _form.Add(pEqGainR);
+
+            var pEqQR = Parameter.Number(
+                "E.Q", "", 0.1, 10.0, 1, new[] { 0.1, 0.1, 1.0 },
+                () => ActiveRight?.EqQ ?? _demoMixerFieldR[6],
+                v =>
+                {
+                    _demoMixerFieldR[6] = v;
+                    if (ActiveRight != null) ActiveRight.EqQ = v;
+                },
+                showSign: false,
+                defaultValue: 1.0);
+            _fDemoMixerFieldsR[6] = _form.Add(pEqQR);
+
+            var pEqFreqR = Parameter.Number(
+                "E.Fr", "k", MonoChannel.MinEqFreqHz / 1000.0, MonoChannel.MaxEqFreqHz / 1000.0, 2, new[] { 0.01, 0.1, 1.0 },
+                () => (ActiveRight?.EqFreqHz ?? _demoMixerFieldR[7]) / 1000.0,
+                v =>
+                {
+                    double hz = v * 1000.0;
+                    _demoMixerFieldR[7] = hz;
+                    if (ActiveRight != null) ActiveRight.EqFreqHz = hz;
+                },
+                showSign: false,
+                defaultValue: 1.0);
+            _fDemoMixerFieldsR[7] = _form.Add(pEqFreqR);
+
+            // krok106: druhý, nezávislý demo-fader (čistě kosmetický, stejně jako
+            // _fDemoFader u levého kanálu - viz komentář o kousek výš) - jen aby
+            // obě strany měly vizuálně stejnou krabici.
+            var pDemoFaderR = Parameter.Number(
+                "Fader", "dB", -60, 10, 1, new[] { 0.1, 0.5, 1.0 },
+                () => _demoFaderDbR,
+                v => _demoFaderDbR = v,
+                showSign: true,
+                defaultValue: -6.0);
+            _fDemoFaderR = _form.Add(pDemoFaderR);
 
             // ---- krok79/80: 32 tercie-oktávových (velká tercie, C♯/F/A) pásem
             // ekvalizéru - skutečná zadávací pole ±12dB na pásmo, kmitočet/název tónu
@@ -1624,8 +1807,8 @@ namespace PS150.UI.Windows
                         _eqBandGainDb[idx] = v;
                         _eqBandGainDbL[idx] = v;
                         _eqBandGainDbR[idx] = v;
-                        _audioPlayer.LeftEq32?.SetBandGainDb(idx, v);
-                        _audioPlayer.RightEq32?.SetBandGainDb(idx, v);
+                        ActiveLeftEq32?.SetBandGainDb(idx, v);
+                        ActiveRightEq32?.SetBandGainDb(idx, v);
                     },
                     showSign: true,
                     defaultValue: 0.0);
@@ -1646,7 +1829,7 @@ namespace PS150.UI.Windows
                     v =>
                     {
                         _eqBandGainDbL[idx] = v;
-                        _audioPlayer.LeftEq32?.SetBandGainDb(idx, v);
+                        ActiveLeftEq32?.SetBandGainDb(idx, v);
                     },
                     showSign: true,
                     defaultValue: 0.0);
@@ -1658,7 +1841,7 @@ namespace PS150.UI.Windows
                     v =>
                     {
                         _eqBandGainDbR[idx] = v;
-                        _audioPlayer.RightEq32?.SetBandGainDb(idx, v);
+                        ActiveRightEq32?.SetBandGainDb(idx, v);
                     },
                     showSign: true,
                     defaultValue: 0.0);
@@ -2376,18 +2559,23 @@ namespace PS150.UI.Windows
         private const int EqBandsStereoBlockRows = EqBandsBlockRows;
 
         /// <summary>Počet řádků, které si ukázka mixpultu zabere - viz RenderWidgetPreview.
-        /// 1 prázdný řádek + 1 popisek + 4 (horní legenda/stupnice/pruh/dolní legenda).</summary>
-        private const int MixerBlockRows = 1 + 1 + 4;
+        /// krok106: TEĎ DVA nezávislé mono pulty (L a P) pod sebou, každý
+        /// 1 popisek + 4 (horní legenda/stupnice/pruh/dolní legenda) = 5 řádků,
+        /// plus 1 prázdný řádek před prvním a 1 prázdný řádek mezi oběma pulty.</summary>
+        private const int MixerBlockRows = 1 + 5 + 1 + 5;
 
-        /// <summary>krok95: nahrazuje dřívější konstantu - 32pásmový ekvalizér (82
-        /// řádků) se počítá do celkové výšky okna jen když je zrovna zapnutý
-        /// (_showEqBands, klávesa E), jinak by dřív natáhl okno pod dolní okraj
-        /// obrazovky (viz krok91). +3 jsou řádky s nápovědou "(E = ...)",
+        /// <summary>krok95/105: nahrazuje dřívější konstantu - 32pásmový ekvalizér se
+        /// počítá do celkové výšky okna jen když je zrovna zapnutý (_showEqBands,
+        /// klávesa E), jinak by dřív natáhl okno pod dolní okraj obrazovky (viz
+        /// krok91). krok105: dřív se vždycky počítaly OBĚ formy (mono i stereo,
+        /// EqBandsBlockRows + EqBandsStereoBlockRows) - teď se zobrazuje jen JEDNA
+        /// podle aktuálního režimu (IsLiveModeActive), viz RenderWidgetPreview,
+        /// takže se počítá taky jen jedna. +3 jsou řádky s nápovědou "(E = ...)",
         /// "(I = ...)" a "(P = ...)" - všechny tři se píšou vždy, ať je
         /// ekvalizér vidět nebo ne (krok99: přibyla druhá nápověda pro přepínání
         /// tabulky kmitočtů, krok101: třetí pro místo odběru analyzéru).</summary>
         private int WidgetPreviewRows =>
-            MixerBlockRows + 3 + (_showEqBands ? EqBandsBlockRows + EqBandsStereoBlockRows : 0);
+            MixerBlockRows + 3 + (_showEqBands ? (IsLiveModeActive ? EqBandsBlockRows : EqBandsStereoBlockRows) : 0);
 
         private static readonly string[] NoteNamesSharp =
             { "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B" };
@@ -2540,8 +2728,11 @@ namespace PS150.UI.Windows
             string tableDescMono = _useIsoBands
                 ? "ISO/IEC třetinooktávová řada, 16Hz-20kHz"
                 : "velká tercie C♯/F/A, 17Hz-22kHz";
+            // krok105: tenhle formulář se teď kreslí JEN při živém hraní (viz
+            // RenderWidgetPreview) - MONO, protože živé hraní je jeden jediný
+            // kanál (App.OrganEngine.LiveChannel/LiveEq32, viz ActiveLeftEq32).
             _grid.ForegroundColor = ConsoleColor.DarkGray;
-            _grid.WriteLine($" Ekvalizér, 32 tercie-oktávových pásem ({tableDescMono}), se zadávacími poli:");
+            _grid.WriteLine($" Ekvalizér, 32 tercie-oktávových pásem, MONO (živé hraní) ({tableDescMono}), se zadávacími poli:");
             _grid.ResetColor();
 
             _grid.ForegroundColor = ConsoleColor.DarkGray;
@@ -2568,7 +2759,7 @@ namespace PS150.UI.Windows
                     // hodnota na každém řádku). Když zrovna nehraje stereo soubor,
                     // LeftAnalyzer32 je null a metr spadne zpátky na _leftDb, ať
                     // formulář dál "žije" i bez reálného měření.
-                    double bandDb = _audioPlayer.LeftAnalyzer32?.GetBandLevelDb(band) ?? _leftDb;
+                    double bandDb = ActiveLeftAnalyzer32?.GetBandLevelDb(band) ?? _leftDb;
                     DrawMeterBar(bandDb, 40, label);
                     DrawFaderBarField(_fEqBandGain[band], 18, -12.0, 12.0, "dB");
                     _grid.ResetColor();
@@ -2607,6 +2798,9 @@ namespace PS150.UI.Windows
             string tableDescStereo = _useIsoBands
                 ? "ISO/IEC třetinooktávová řada, 16Hz-20kHz"
                 : "velká tercie C♯/F/A, 17Hz-22kHz";
+            // krok105: tenhle formulář se teď kreslí JEN při přehrávání souboru
+            // (.mp3 i .mid, viz RenderWidgetPreview/_isMidiMode) - zdroj (který z
+            // obou přehrávačů) se pozná podle popisku níž (OutputDescription).
             _grid.ForegroundColor = ConsoleColor.DarkGray;
             _grid.WriteLine($" Ekvalizér, 32 tercie-oktávových pásem, STEREO (L a P vedle sebe), {tableDescStereo}, se zadávacími poli:");
             _grid.ResetColor();
@@ -2638,8 +2832,8 @@ namespace PS150.UI.Windows
                     // tohoto pásma z reálného analyzéru, zvlášť pro levý a pravý
                     // kanál (za ekvalizérem), místo dřívějšího opakovaného _leftDb/
                     // _rightDb.
-                    double bandDbL = _audioPlayer.LeftAnalyzer32?.GetBandLevelDb(band) ?? _leftDb;
-                    double bandDbR = _audioPlayer.RightAnalyzer32?.GetBandLevelDb(band) ?? _rightDb;
+                    double bandDbL = ActiveLeftAnalyzer32?.GetBandLevelDb(band) ?? _leftDb;
+                    double bandDbR = ActiveRightAnalyzer32?.GetBandLevelDb(band) ?? _rightDb;
 
                     DrawMeterBar(bandDbL, 40, label);
                     DrawFaderBarField(_fEqBandGainL[band], 18, -12.0, 12.0, "dB");
@@ -2674,24 +2868,26 @@ namespace PS150.UI.Windows
         /// mixpultu jsou SKUTEČNÁ zadávací pole (klik/kolečko/+-/zadání čísla),
         /// označení vstupu/matrixu ("In1") zůstává jen zobrazovaný text.
         ///
-        /// krok91: RenderEqBands/RenderEqBandsStereo (32pásmový EQ, mono i
-        /// stereo formulář) se DOČASNĚ přestaly kreslit - obě "pro parádu"
-        /// zabíraly dohromady 82 řádků, díky čemuž bylo celé okno vyšší než
-        /// obrazovka (SizeToContent ho natáhlo přes dolní okraj monitoru) a
-        /// právě tahle dvě pásma byla úplně dole, tedy mimo viditelnou plochu.
-        /// Metody samotné, zadávací pole i skutečné napojení na
-        /// GraphicEqualizer32Band (viz AudioPlayer.LeftEq32/RightEq32) zůstávají
-        /// beze změny - jen se prozatím nekreslí (viz WidgetPreviewRows níž,
-        /// kde jim taky přestal patřit prostor). Až na ně dojde řada, stačí
-        /// tahle dvě volání zase odkomentovat.
+        /// krok105: dřív se při zapnutém _showEqBands kreslily OBĚ 32pásmové
+        /// formy najednou (mono i stereo) - uživatel si stěžoval, že se mu
+        /// zbytečně zobrazují obě, i když jedna z nich zrovna k ničemu není
+        /// (viz jeho zadání "Nepotřebný ekvalizér smazat"). Teď se podle
+        /// IsLiveModeActive kreslí VŽDY JEN JEDNA: mono formulář (RenderEqBands,
+        /// napojený na App.OrganEngine.LiveEq32/LiveAnalyzer32 přes ActiveLeftEq32/
+        /// ActiveLeftAnalyzer32) při živém hraní, stereo formulář
+        /// (RenderEqBandsStereo, napojený na _audioPlayer/_midiPlayer podle
+        /// _isMidiMode) při přehrávání souboru.
         /// </summary>
         private void RenderWidgetPreview()
         {
-            // krok95: E přepíná viditelnost - viz _showEqBands/HandleInput.
+            // krok95/105: E přepíná viditelnost, IsLiveModeActive rozhoduje,
+            // KTERÁ z obou forem (mono/stereo) se zrovna kreslí - viz _showEqBands/
+            // HandleInput a komentář u třídy výš.
             if (_showEqBands)
             {
-                RenderEqBands();
-                RenderEqBandsStereo();
+                if (IsLiveModeActive) RenderEqBands();
+                else RenderEqBandsStereo();
+
                 _grid.ForegroundColor = ConsoleColor.DarkGray;
                 _grid.WriteLine(" (E = schovat ekvalizér)");
                 _grid.ResetColor();
@@ -2699,7 +2895,7 @@ namespace PS150.UI.Windows
             else
             {
                 _grid.ForegroundColor = ConsoleColor.DarkGray;
-                _grid.WriteLine(" (E = zobrazit 32pásmový ekvalizér - mono + stereo formulář)");
+                _grid.WriteLine($" (E = zobrazit 32pásmový ekvalizér - {(IsLiveModeActive ? "mono formulář, živé hraní" : "stereo formulář")})");
                 _grid.ResetColor();
             }
 
@@ -2718,8 +2914,25 @@ namespace PS150.UI.Windows
 
             _grid.WriteLine();
 
+            // krok106: na uživatelovo přání ("opravdu dva mono, na zkoušení,
+            // ukazování a vývoj") teď jsou tu DVA SKUTEČNĚ NEZÁVISLÉ mixpulty -
+            // kanál L (ActiveLeft) a kanál P (ActiveRight) - každý se svými
+            // vlastními poli (dřív jeden řádek psal do obou najednou). Při živém
+            // hraní míří oba na STEJNOU instanci (App.OrganEngine.LiveChannel je
+            // jeden mono kanál) - to je správně, oba pulty pak logicky ukazují/
+            // mění totéž. Skutečně nezávislé L/P ovládání mají jinak i 32pásmové
+            // EQ formuláře výš (EqL/EqR).
+            RenderMixerStrip("L", ActiveLeft, _leftDb, _fDemoFader, _fDemoMixerFields);
+            _grid.WriteLine();
+            RenderMixerStrip("P", ActiveRight, _rightDb, _fDemoFaderR, _fDemoMixerFieldsR);
+        }
+
+        /// <summary>krok106: jeden mono mixpultový pás (meter + ukázkový fader + 8 polí Gain..E.Fr) - viz volání výš.</summary>
+        private void RenderMixerStrip(string channelLabel, MonoChannel? channel, double meterDb, FormField faderField, FormField[] fields)
+        {
             _grid.ForegroundColor = ConsoleColor.DarkGray;
-            _grid.WriteLine(" Mixážní pult (ukázka jednoho kanálu, přesně 121 znaků, se zadávacími poli):");
+            string stav = IsLiveModeActive ? "živé hraní, mono" : (channel != null ? "soubor, nezávisle" : "soubor nehraje");
+            _grid.WriteLine($" Mixážní pult, kanál {channelLabel} ({stav}, přesně 121 znaků, se zadávacími poli):");
             _grid.ResetColor();
 
             _grid.ForegroundColor = ConsoleColor.DarkGray;
@@ -2732,8 +2945,8 @@ namespace PS150.UI.Windows
             _grid.ResetColor();
             _grid.WriteLine();
 
-            DrawMeterBar(_leftDb, 40, $"In{_demoMixerInput:F0}");   // krok78: označení vstupu/matrixu je jen zobrazovaný text, ne pole
-            DrawFaderBarField(_fDemoFader, 40, -60.0, 10.0, "dB");
+            DrawMeterBar(meterDb, 40, $"In{_demoMixerInput:F0}");   // krok78: označení vstupu/matrixu je jen zobrazovaný text, ne pole
+            DrawFaderBarField(faderField, 40, -60.0, 10.0, "dB");
 
             _grid.BackgroundColor = ConsoleColor.Black;
             _grid.ForegroundColor = ConsoleColor.DarkGray;
@@ -2751,9 +2964,9 @@ namespace PS150.UI.Windows
                 // s hodnotami pořád vejde přesně do 121 znaků mřížky.
                 int width = i switch { 1 or 4 => 3, 7 => 6, _ => 4 };
                 string valueText = i == 7
-                    ? _fDemoMixerFields[i].Parameter.FormatValue() + _fDemoMixerFields[i].Parameter.Unit
-                    : _fDemoMixerFields[i].Parameter.FormatValue();
-                DrawTinyField(_fDemoMixerFields[i], width, valueText);
+                    ? fields[i].Parameter.FormatValue() + fields[i].Parameter.Unit
+                    : fields[i].Parameter.FormatValue();
+                DrawTinyField(fields[i], width, valueText);
                 _grid.BackgroundColor = ConsoleColor.Black;
                 _grid.ForegroundColor = ConsoleColor.DarkGray;
                 _grid.Write("│");

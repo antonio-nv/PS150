@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Melanchall.DryWetMidi.Core;
 
 namespace PS150.Core.Sampler
@@ -9,10 +9,19 @@ namespace PS150.Core.Sampler
     /// GmPianoMidiPlayer pro nezávislý výběr banky pro bicí vs. pro tóny u
     /// přehrávání .mid souborů (viz AvailablePlaybackBanks / AvailableDrumBanks).
     ///
-    /// Žádné ruční mixování zvuku tu není potřeba: oba vnitřní enginy (typicky
-    /// Sf2MidiSynth) si hrají každý na svůj vlastní WaveOutEvent/výstup, stejně
-    /// jako kdyby hrály dvě různé aplikace najednou - zvuková karta/Windows je
-    /// smíchá sama.
+    /// Řeší to VÝHRADNĚ směrování MIDI UDÁLOSTÍ (NoteOn/Off, CC, pitch bend...)
+    /// na správný subengine - o samotný ZVUK (ISampleProvider výstup obou
+    /// subenginů) se tahle třída nestará vůbec.
+    ///
+    /// krok104: dřív (do kroku 103) tenhle komentář tvrdil, že "žádné ruční
+    /// mixování zvuku tu není potřeba", protože oba vnitřní enginy hrály každý
+    /// sám na svůj vlastní WaveOutEvent/výstup (zvuková karta/Windows je
+    /// smíchala sama). Od kroku 104 to NENÍ pravda - GmPianoMidiPlayer.PlayAsync
+    /// vytváří oba subenginy přes "ForMixing" varianty (BEZ vlastního
+    /// WaveOutEvent) a jejich zvukové výstupy ručně sčítá (viz
+    /// PS150.Core.Mixers.SummingSampleProvider) do jednoho sdíleného
+    /// mixpultu+ekvalizéru+výstupu. Tahle třída (DualEngineMidiOut) tím není
+    /// nijak dotčená - pořád jen směruje MIDI události, zvuk nikdy neviděla.
     /// </summary>
     public sealed class DualEngineMidiOut : IMidiOut, ISupportsMelodicRegister, ISupportsDrumRegister, ISupportsSyntheticRegister, IProvidesAudioMeter
     {

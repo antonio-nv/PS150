@@ -165,11 +165,17 @@ namespace PS150.Core.Parameters
                 return false;
             }
 
-            if (value < Min || value > Max)
-            {
-                error = $"{Name}: {FormatValue(Min)} až {FormatValue(Max)} {Unit}".TrimEnd();
-                return false;
-            }
+            // krok106: mimo rozsah se dřív odmítalo tmavě červenou chybovou
+            // hláškou (FieldStyle.Error) - podle uživatelovy zpětné vazby to
+            // zbytečně děsí, a to u VŠECH číselných polí v aplikaci (banka,
+            // mixpultové potenciometry, EQ pásma...), ne jen někde. Teď se
+            // mimorozsahové, ale jinak PLATNÉ číslo tiše ořízne na nejbližší
+            // mez - stejné chování, jaké SetValue/Nudge dělají odjakživa u
+            // kolečka/+-/krokování, jen teď i u ručně napsaného čísla. Zůstává
+            // chyba jen pro doopravdy nepoužitelné zadání (prázdné pole,
+            // nečíselný text) výš.
+            if (value < Min) value = Min;
+            else if (value > Max) value = Max;
 
             return true;
         }

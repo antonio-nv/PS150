@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using PS150.Core.ToneEngine;
+using PS150.Core.Mixers;        // krok103: MonoChannel pro živé hraní
+using PS150.Core.Equalizers;    // krok103: GraphicEqualizer32Band/SpectrumAnalyzer32Band pro živé hraní
 using NAudio.Wave;
 
 namespace PS150.Core.Output
@@ -41,6 +43,22 @@ namespace PS150.Core.Output
         /// <summary>krok66: zaregistruje "tvrdý stop" pro banku s vlastním živým enginem (viz _hardStopByBank výš).</summary>
         public void RegisterHardStop(int bankNumber, Action hardStop) => _hardStopByBank[bankNumber] = hardStop;
 
+        // krok103: mixpult + 32pásmový ekvalizér + spektrální analyzér pro ŽIVÉ
+        // hraní - stejné stavební kameny (MonoChannel/GraphicEqualizer32Band/
+        // SpectrumAnalyzer32Band) jako u .mp3 přehrávače
+        // (StereoMonoChannelSampleProvider), ale jen JEDEN mono kanál, protože
+        // živé hraní je architekturou napevno mono (viz WaveFormat výš - varhany
+        // i domíchané OPL3 končí v jednom společném mono vzorku, viz Read níž).
+        // Na rozdíl od AudioPlayer.LeftChannelStrip/LeftEq32 (nullable, mizí/vznikají
+        // podle toho, jestli se zrovna hraje stereo soubor) tyhle existují po
+        // celou dobu běhu AudioEngine - živé hraní buď jede, nebo appka neběží.
+        public MonoChannel LiveChannel { get; }
+        public GraphicEqualizer32Band LiveEq32 { get; }
+        public SpectrumAnalyzer32Band LiveAnalyzer32 { get; }
+
+        /// <summary>krok103: stejný princip jako StereoMonoChannelSampleProvider.AnalyzerTapPreEq - viz tam.</summary>
+        public bool LiveAnalyzerTapPreEq { get; set; }
+
         // Špičková úroveň od posledního čtení (pro VU metr). Stejný princip
         // jako MaxLeftPeak/MaxRightPeak v AudioPlayer.cs.
         private float _peakSinceLastRead;
@@ -51,6 +69,14 @@ namespace PS150.Core.Output
         {
             _synth = synth;
             WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1); // 44.1 kHz, Mono, 32-bit Float
+
+            // krok103: viz LiveChannel/LiveEq32/LiveAnalyzer32 výš - všechny tři
+            // jsou při výchozím/neutrálním nastavení transparentní (0dB zisk, HPF
+            // vypnutý, gate/comp neaktivní, EQ 0dB...), takže jejich vložení samo
+            // o sobě nijak nezmění zvuk, dokud uživatel něco nenastaví.
+            LiveChannel = new MonoChannel(sampleRate);
+            LiveEq32 = new GraphicEqualizer32Band(sampleRate);
+            LiveAnalyzer32 = new SpectrumAnalyzer32Band(sampleRate);
         }
 
         /// <summary>krok58: zapojí živý OplMidiSynth (banka 8) do mixu - viz Read níž. Volá se jednou při startu (App.xaml.cs).</summary>
@@ -149,6 +175,15 @@ namespace PS150.Core.Output
                 {
                     sample += (_liveOplBuffer[i * 2] + _liveOplBuffer[i * 2 + 1]) * 0.5f;
                 }
+
+                // krok103: mixpult -> 32pásmový ekvalizér -> spektrální analyzér
+                // (jen měří, signál nemění) - stejné pořadí a stejný princip
+                // jako u .mp3 přehrávače (StereoMonoChannelSampleProvider.Read),
+                // jen v jednom mono kanálu místo dvou.
+                double channelOut = LiveChannel.Process(sample);
+                double eqOut = LiveEq32.Process(channelOut);
+                LiveAnalyzer32.Process(LiveAnalyzerTapPreEq ? channelOut : eqOut);
+                sample = (float)eqOut;
 
                 TrackPeak(ref _peakSinceLastRead, sample);
 

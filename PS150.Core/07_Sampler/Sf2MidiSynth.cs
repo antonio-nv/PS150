@@ -183,6 +183,22 @@ namespace PS150.Core.Sampler
         /// <summary>krok20: syntezátor bez zvukové karty (pro diagnostické vykreslení do WAV, viz Sf2Render).</summary>
         public static Sf2MidiSynth? CreateOffline(Sf2Bank bank) => Create(bank, false, 1, 1, null);
 
+        /// <summary>
+        /// krok104: stejné jako TryCreate, ale BEZ vlastního WaveOutEvent - pro
+        /// .mid přehrávač (GmPianoMidiPlayer), který teď VŠECHNY enginy (tónový
+        /// i bicí) spojuje do JEDNOHO sdíleného výstupu přes mixpult+ekvalizér
+        /// (viz PS150.Core.Mixers.SummingSampleProvider a
+        /// StereoMonoChannelSampleProvider), místo aby si každý hrál sám na
+        /// svou vlastní zvukovou kartu. Stejný princip jako
+        /// OplMidiSynth.CreateForLiveMixing/TryCreateForMixing.
+        /// </summary>
+        public static Sf2MidiSynth? TryCreateForMixing(int bankNumber, int universalProgram = 1, int drumProgram = 1)
+        {
+            var bank = Sf2Loader.GetBank(bankNumber);
+            if (bank == null) return null;
+            return Create(bank, false, universalProgram, drumProgram, bankNumber);
+        }
+
         // krok32: bankNumber jen kvůli popisku (Description) - viz BankTable.Find níž.
         // null, když ho nemáme po ruce (CreateOffline) - pak se vezme aspoň jméno souboru.
         private static Sf2MidiSynth? Create(Sf2Bank bank, bool play, int universalProgram, int drumProgram, int? bankNumber)

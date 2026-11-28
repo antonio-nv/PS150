@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Melanchall.DryWetMidi.Core;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -85,18 +85,30 @@ namespace PS150.Core.Sampler
         /// <summary>krok41: isDrumEngine jen kvůli popisku - ToneEngine sám pozná bicí kanál (D10) podle čísla kanálu, viz SendEvent.</summary>
         public static SyntheticMidiSynth Create(bool isDrumEngine)
         {
-            var synth = new SyntheticMidiSynth(
+            var synth = CreateForMixing(isDrumEngine);
+
+            synth._waveOut = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 4 };
+            synth._waveOut.Init(new SampleToWaveProvider16(synth));
+            synth._waveOut.Play();
+            return synth;
+        }
+
+        /// <summary>
+        /// krok104: stejné jako Create výš, ale BEZ vlastního WaveOutEvent -
+        /// pro .mid přehrávač (GmPianoMidiPlayer), který teď VŠECHNY enginy
+        /// (tónový i bicí) spojuje do JEDNOHO sdíleného výstupu přes
+        /// mixpult+ekvalizér (viz PS150.Core.Mixers.SummingSampleProvider a
+        /// StereoMonoChannelSampleProvider).
+        /// </summary>
+        public static SyntheticMidiSynth CreateForMixing(bool isDrumEngine)
+        {
+            return new SyntheticMidiSynth(
                 isDrumEngine
                     ? "Syntetické zvuky, bicí (ToneEngine)"
                     : "Syntetické zvuky, tóny (ToneEngine)",
                 isDrumEngine
                     ? PS150.Core.Banks._009_SynteticBici.Number
                     : PS150.Core.Banks._001_SyntetickeZvuky.Number);
-
-            synth._waveOut = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 4 };
-            synth._waveOut.Init(new SampleToWaveProvider16(synth));
-            synth._waveOut.Play();
-            return synth;
         }
 
         /// <summary>

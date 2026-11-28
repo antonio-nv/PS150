@@ -8,7 +8,11 @@ using Melanchall.DryWetMidi.Common;
 using Melanchall.DryWetMidi.Core;
 using Melanchall.DryWetMidi.Interaction;
 using Melanchall.DryWetMidi.Multimedia;
+using NAudio.Wave;                    // krok104: WaveOutEvent, ISampleProvider - sdílený zvukový výstup
+using NAudio.Wave.SampleProviders;    // krok104: SampleToWaveProvider16
 using PS150.Core.Sampler;   // krok18: Sf2MidiSynth, IMidiOut
+using PS150.Core.Mixers;      // krok104: StereoMonoChannelSampleProvider, MonoChannel, SummingSampleProvider
+using PS150.Core.Equalizers;  // krok104: GraphicEqualizer32Band, SpectrumAnalyzer32Band
 
 namespace PS150.UI.Windows
 {
@@ -52,7 +56,10 @@ namespace PS150.UI.Windows
     /// Sound Effects (120–127): Guitar Fret Noise, Breath Noise, Seashore, Bird Tweet, Telephone Ring, Helicopter, Applause, Gunshot
     /// 
     /// </summary>
-    public class GmPianoMidiPlayer : IDisposable
+    // krok105: implementuje IStereoDspSource (společně s AudioPlayer) -
+    // FileBrowserWindow díky tomu může ovládat .mp3 i .mid stejným kódem,
+    // viz FileBrowserWindow.ActiveStereoSource.
+    public class GmPianoMidiPlayer : IDisposable, IStereoDspSource
     {
         // Číslo nástroje se posílá po drátě jako hodnota 0-127 (Program Change).
         // Tištěné tabulky GM nástrojů bývají číslované 1-128 pro lidi ("č. 1 =
@@ -130,20 +137,26 @@ namespace PS150.UI.Windows
         /// krok37: drumRegister se předává jen Sf2MidiSynth (OplMidiSynth bicí
         /// sady nezná - jedna univerzální mapa, viz Op2Bank; SyntheticMidiSynth
         /// taky ne zatím - viz komentář u té třídy).
+        /// krok104: VŠECHNY tři enginy se teď vytvářejí přes "ForMixing"
+        /// varianty - BEZ vlastního WaveOutEvent. Dřív si každý engine hrál
+        /// sám na svůj vlastní (nezávislý) výstup zvukové karty; teď je jejich
+        /// zvukový výstup (ISampleProvider) jen SUROVINA pro jeden sdílený
+        /// mixpult+ekvalizér+výstup, který sestavuje PlayAsync (viz
+        /// _stereoChannelStrip/_waveOut níž).
         /// </summary>
         private IMidiOut? CreateBankEngine(int bankNumber, bool isDrumEngine, int melodicRegister, int drumRegister)
         {
             if (bankNumber == PS150.Core.Banks._008_SoundBlaster.Number)
             {
                 if (!System.IO.File.Exists(OplGenMidiPath)) return null;
-                return OplMidiSynth.TryCreate(OplGenMidiPath, isDrumEngine, melodicRegister);
+                return OplMidiSynth.TryCreateForMixing(OplGenMidiPath, isDrumEngine, melodicRegister);
             }
             if (bankNumber == PS150.Core.Banks._001_SyntetickeZvuky.Number
                 || bankNumber == PS150.Core.Banks._009_SynteticBici.Number)
             {
-                return SyntheticMidiSynth.Create(isDrumEngine);
+                return SyntheticMidiSynth.CreateForMixing(isDrumEngine);
             }
-            return Sf2MidiSynth.TryCreate(bankNumber, melodicRegister, drumRegister);
+            return Sf2MidiSynth.TryCreateForMixing(bankNumber, melodicRegister, drumRegister);
         }
 
         /// <summary>
@@ -641,13 +654,52 @@ namespace PS150.UI.Windows
         // panorámy po resetu ze souboru (viz ReassertChannelState).
         private volatile int[] _usedChannelsForPan = Array.Empty<int>();
 
-        // krok18: výstup přehrávače .mid. Natvrdo vlastní sampler (klavír + bicí
-        // z banky MuseScore_General, viz Sf2MidiSynth).
-        // krok102: dřívější záloha "Microsoft GS Wavetable Synth" (GsWavetableOut)
-        // byla ZRUŠENA - viz komentář u PlayAsync. Když se žádnou skutečnou banku
-        // nepodaří vytvořit, přehrávání teď rovnou selže, místo tichého skoku na
-        // Windows syntezátor.
+        // krok18: MIDI UDÁLOSTI přehrávače .mid (NoteOn/Off, CC, pitch bend...) -
+        // natvrdo vlastní sampler (klavír + bicí z banky MuseScore_General, viz
+        // Sf2MidiSynth). krok102: dřívější záloha "Microsoft GS Wavetable Synth"
+        // (GsWavetableOut) byla ZRUŠENA - viz komentář u PlayAsync. Když se
+        // žádnou skutečnou banku nepodaří vytvořit, přehrávání teď rovnou
+        // selže, místo tichého skoku na Windows syntezátor.
+        // krok104: POZOR - tohle pole od teď řeší jen SMĚROVÁNÍ MIDI událostí
+        // na správný subengine (DualEngineMidiOut). Samotný ZVUK (ISampleProvider
+        // výstup obou subenginů) teče jinudy - viz _stereoChannelStrip/_waveOut
+        // níž, sestavované v PlayAsync.
         private IMidiOut? _outputDevice;
+
+        // krok104: sdílený zvukový výstup VŠECH enginů .mid přehrávače (tónový +
+        // bicí, viz CreateBankEngine výš - teď "ForMixing" varianty BEZ
+        // vlastního WaveOutEvent). SummingSampleProvider v PlayAsync sečte oba
+        // stereo proudy do jednoho, ten jde přes StereoMonoChannelSampleProvider
+        // (mixpult + 32pásmový ekvalizér + spektrální analyzér, L a P zvlášť -
+        // stejná třída jako u .mp3 v AudioPlayer.BuildOutput) na JEDEN sdílený
+        // WaveOutEvent. Null, dokud nic nehraje.
+        private StereoMonoChannelSampleProvider? _stereoChannelStrip;
+        private WaveOutEvent? _waveOut;
+
+        /// <summary>krok104: kanálový pás levého kanálu (Gain/HPF/Gate/Comp/EQ) - stejný princip jako AudioPlayer.LeftChannelStrip. Null, dokud nic nehraje.</summary>
+        public MonoChannel? LeftChannelStrip => _stereoChannelStrip?.Left;
+
+        /// <summary>krok104: totéž pro pravý kanál.</summary>
+        public MonoChannel? RightChannelStrip => _stereoChannelStrip?.Right;
+
+        /// <summary>krok104: skutečný 32pásmový ekvalizér levého kanálu - null, dokud nic nehraje.</summary>
+        public GraphicEqualizer32Band? LeftEq32 => _stereoChannelStrip?.LeftEq32;
+
+        /// <summary>krok104: totéž pro pravý kanál.</summary>
+        public GraphicEqualizer32Band? RightEq32 => _stereoChannelStrip?.RightEq32;
+
+        /// <summary>krok104: skutečný spektrální analyzér levého kanálu - null, dokud nic nehraje.</summary>
+        public SpectrumAnalyzer32Band? LeftAnalyzer32 => _stereoChannelStrip?.LeftAnalyzer32;
+
+        /// <summary>krok104: totéž pro pravý kanál.</summary>
+        public SpectrumAnalyzer32Band? RightAnalyzer32 => _stereoChannelStrip?.RightAnalyzer32;
+
+        /// <summary>krok104: živé místo odběru obou analyzérů - stejný princip jako AudioPlayer.AnalyzerTapPreEq. Pokud zrovna nic nehraje, nastavení se jen tiše neuplatní.</summary>
+        public bool AnalyzerTapPreEq
+        {
+            get => _stereoChannelStrip?.AnalyzerTapPreEq ?? false;
+            set { if (_stereoChannelStrip != null) _stereoChannelStrip.AnalyzerTapPreEq = value; }
+        }
 
         /// <summary>krok20: popis aktuálního zdroje zvuku pro obrazovku (zůstává i po doznění skladby).</summary>
         public string OutputDescription { get; private set; } = "MIDI";
@@ -718,6 +770,16 @@ namespace PS150.UI.Windows
         /// </summary>
         public event Action<Exception>? PlaybackFailed;
 
+        /// <summary>
+        /// krok105: POZOR pro volající (viz FileBrowserWindow.UpdateFileTypeState) -
+        /// všechno před prvním (a jediným) "await" v týhle metodě (čtení souboru,
+        /// sestavení MIDI enginů i celého sdíleného mixpultu/EQ, viz
+        /// _stereoChannelStrip/_waveOut) běží ČISTĚ SYNCHRONNĚ. I bez "await
+        /// PlayAsync(...)" (tedy "_ = PlayAsync(...)") je tedy hned po volání
+        /// jisté, že _stereoChannelStrip/LeftEq32/RightEq32/... jsou buď hotové,
+        /// nebo PlaybackFailed už byl vyvolán - klidně se dá hned volat
+        /// ApplyActiveBandTable() na nově vzniklý mixpult.
+        /// </summary>
         public async Task PlayAsync(string filePath)
         {
             if (!File.Exists(filePath)) return;
@@ -773,6 +835,35 @@ namespace PS150.UI.Windows
                 }
 
                 OutputDescription = _outputDevice.Description;
+
+                // krok104: sdílený zvukový výstup - viz komentář u
+                // _stereoChannelStrip/_waveOut výš. tonalEngine/drumEngine jsou
+                // teď "ForMixing" varianty (CreateBankEngine) BEZ vlastního
+                // WaveOutEvent, takže odsud jde ven VŠECHEN zvuk .mid přehrávače.
+                var sources = new List<ISampleProvider>();
+                if (tonalEngine is ISampleProvider tonalSample) sources.Add(tonalSample);
+                if (drumEngine is ISampleProvider drumSample) sources.Add(drumSample);
+
+                ISampleProvider mixed = sources.Count == 1 ? sources[0] : new SummingSampleProvider(sources);
+
+                // krok104: ZJEDNODUŠENÍ (stejný duch jako jinde v projektu,
+                // např. OplMidiSynth/SyntheticMidiSynth) - VŠECHNY dnešní enginy
+                // (Sf2MidiSynth/OplMidiSynth/SyntheticMidiSynth) jsou napevno
+                // stereo (WaveFormat.Channels == 2), takže se tu zatím řeší jen
+                // STEREO větev (dva mono mixpulty + jeden stereo 32pásmový
+                // ekvalizér, stejně jako u .mp3). Mono větev (jeden mono
+                // mixpult+EQ, viz zadání uživatele) nemá dnes na čem se
+                // otestovat - přibude, až bude mít .mid přehrávač k dispozici
+                // doopravdy mono engine (srovnej AudioEngine.LiveChannel, kde
+                // je to naopak - živé hraní JE napevno mono).
+                _stereoChannelStrip = mixed.WaveFormat.Channels == 2
+                    ? new StereoMonoChannelSampleProvider(mixed)
+                    : null;
+                ISampleProvider outChain = _stereoChannelStrip ?? mixed;
+
+                _waveOut = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 4 };
+                _waveOut.Init(new SampleToWaveProvider16(outChain));
+                _waveOut.Play();
 
                 // NOVÉ: tolerantní čtení - některé (hlavně herní) .mid soubory mají
                 // v řídicí události hodnotu mimo rozsah 0-127 (např. 128). DryWetMidi
@@ -1449,6 +1540,20 @@ namespace PS150.UI.Windows
             }
 
             _playbackTask = null;
+
+            // krok104: nejdřív zastavit a uvolnit SDÍLENÝ zvukový výstup - až
+            // pak uvolnit samotné enginy (_outputDevice?.Dispose() níž). Jinak
+            // by WaveOutEvent mohl ještě na zlomek okamžiku zavolat Read() na
+            // už uvolňovaných enginech (stejný princip opatrnosti jako u
+            // čekání na _playbackTask výš kvůli NoteOff).
+            var waveOut = _waveOut;
+            _waveOut = null;
+            if (waveOut != null)
+            {
+                try { waveOut.Stop(); } catch { }
+                waveOut.Dispose();
+            }
+            _stereoChannelStrip = null;
 
             _outputDevice?.Dispose();
             _outputDevice = null;

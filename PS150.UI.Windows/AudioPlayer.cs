@@ -10,7 +10,10 @@ using PS150.Core.Equalizers;   // krok89: GraphicEqualizer32Band
 
 namespace PS150.UI.Windows
 {
-    public class AudioPlayer : IDisposable
+    // krok105: implementuje IStereoDspSource (společně s GmPianoMidiPlayer) -
+    // FileBrowserWindow díky tomu může ovládat .mp3 i .mid stejným kódem,
+    // viz FileBrowserWindow.ActiveStereoSource.
+    public class AudioPlayer : IDisposable, IStereoDspSource
     {
         // ZMĚNA: místo přímo WasapiOut je výstup "trasa" (IAudioRoute) - buď
         // zvuková karta počítače (WASAPI), nebo síť (externí zvukovka, viz
