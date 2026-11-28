@@ -6,7 +6,7 @@ rozšíření (elektronické varhany na Raspberry Pi).
 ## Projekty v tomto řešení
 
 - **PS150.UI.Windows** – přehrávač audio souborů (mp3, wav, flac, MIDI,), přehrávač video souborů (avi, MP4)
-  napojení na MIDI-IN. Provizorně zatím používá SW knihovny GM, MuseScore, Burea, Genmidi
+  napojení na MIDI-IN. Provizorně zatím používá SW knihovny MuseScore, Burea, Genmidi, OPL3
 - **PS150.UI.Linux** – plán do budouctna
 - **PS150.Core** – SW syntezátor zvuku (oscilátory, obálky, filtry, hlasy nástrojů). Společné metody pro přehrávač souborů
 - **PS150.Analyzer** – SW analyzátor zvuku s 2D grafy (WPF).
