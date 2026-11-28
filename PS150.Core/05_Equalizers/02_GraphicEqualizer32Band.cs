@@ -27,6 +27,11 @@ namespace PS150.Core.Equalizers
         private readonly double[] _gainDb = new double[GraphicEqBands.Count];
         private readonly double _sampleRate;
 
+        // krok99: kmitočty NEJSOU napevno - viz UseFrequencyTable níž (živé přepnutí
+        // hudební <-> ISO třetinooktávové tabulky, viz FileBrowserWindow._useIsoBands).
+        // Výchozí je pořád hudební tabulka (GraphicEqBands), stejně jako dřív.
+        private double[] _centerFreqHz = GraphicEqBands.CenterFreqHz;
+
         public GraphicEqualizer32Band(double sampleRate)
         {
             if (sampleRate <= 0.0) throw new ArgumentOutOfRangeException(nameof(sampleRate));
@@ -36,7 +41,7 @@ namespace PS150.Core.Equalizers
             for (int i = 0; i < _bands.Length; i++)
             {
                 _bands[i] = new Biquad();
-                _bands[i].SetPeakingEq(_sampleRate, GraphicEqBands.CenterFreqHz[i], 0.0, DefaultQ);
+                _bands[i].SetPeakingEq(_sampleRate, _centerFreqHz[i], 0.0, DefaultQ);
             }
         }
 
@@ -45,10 +50,32 @@ namespace PS150.Core.Equalizers
         {
             if (band < 0 || band >= _bands.Length) throw new ArgumentOutOfRangeException(nameof(band));
             _gainDb[band] = gainDb;
-            _bands[band].SetPeakingEq(_sampleRate, GraphicEqBands.CenterFreqHz[band], gainDb, DefaultQ);
+            _bands[band].SetPeakingEq(_sampleRate, _centerFreqHz[band], gainDb, DefaultQ);
         }
 
         public double GetBandGainDb(int band) => _gainDb[band];
+
+        /// <summary>
+        /// krok99: přeladí všech 32 pásem na JINOU tabulku kmitočtů (hudební velká
+        /// tercie &lt;-&gt; ISO třetinooktávová řada) ŽIVĚ za chodu - bezpečné i při
+        /// hrající hudbě, protože jde jen o přepočet koeficientů (žádná alokace,
+        /// žádná výjimka na zvukovém vlákně, viz Biquad.Prepare po krok90).
+        ///
+        /// Zisk KAŽDÉHO pásma zůstává zachovaný - je svázaný s POZICÍ/slotem (pásmo
+        /// č. 5), ne s konkrétním kmitočtem, přesně podle výslovného přání uživatele
+        /// ("necháme nastavení, protože stejně dobře se můžeme vrátit zase zpátky a
+        /// nic neztrácíme"). Jen se přeladí kmitočet, na kterém ten zisk působí.
+        /// </summary>
+        public void UseFrequencyTable(double[] centerFreqHz)
+        {
+            if (centerFreqHz == null) throw new ArgumentNullException(nameof(centerFreqHz));
+            if (centerFreqHz.Length != _bands.Length)
+                throw new ArgumentException("Tabulka musí mít stejný počet pásem.", nameof(centerFreqHz));
+
+            _centerFreqHz = centerFreqHz;
+            for (int i = 0; i < _bands.Length; i++)
+                _bands[i].SetPeakingEq(_sampleRate, _centerFreqHz[i], _gainDb[i], DefaultQ);
+        }
 
         /// <summary>Zpracuje jeden vzorek postupně přes všech 32 pásem v sérii.</summary>
         public double Process(double x)

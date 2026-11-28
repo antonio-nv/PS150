@@ -1,4 +1,4 @@
-﻿namespace PS150.Core
+﻿namespace PS150.Core.VUMeters
 {
     /// <summary>
     /// krok72: neutrální (UI-agnostický) stav jedné buňky VU metru - stejný
@@ -12,6 +12,13 @@
         Hot       // svítí, limitace/nejsilnější hodnoty - červená
     }
 
+    // krok84: přestěhováno z PS150.Core/AudioMeter.cs (jmenný prostor PS150.Core) sem,
+    // do PS150.Core/05_VUmeters/ (jmenný prostor PS150.Core.VUMeters) - stejná logika
+    // jako u 05_Filters/05_Equalizers/05_Mixers: číslo 05 pro celou signálovou/
+    // metrovou rodinu. Zatím tu žije jen tahle společná matematika (mono i stereo
+    // VU metr ve FileBrowserWindow.xaml.cs ji obě volají stejně - "mono"/"stereo"
+    // je zatím jen otázka, kolikrát se zavolá a jak se to poskládá v UI, ne
+    // samostatná Core třída), ale je tu místo, kdyby časem přibyly další varianty.
     public static class AudioMeter
     {
         /// <summary>

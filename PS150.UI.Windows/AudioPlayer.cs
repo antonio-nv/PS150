@@ -5,6 +5,8 @@ using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using PS150.Core.Network;
 using PS150.Core.Output;
+using PS150.Core.Mixers;   // krok88: StereoMonoChannelSampleProvider, MonoChannel
+using PS150.Core.Equalizers;   // krok89: GraphicEqualizer32Band
 
 namespace PS150.UI.Windows
 {
@@ -18,6 +20,42 @@ namespace PS150.UI.Windows
 
         private AudioFileReader? _audioFile;
         private MeteringSampleProvider? _meteringProvider;
+
+        // krok88: zkušební zapojení - levý a pravý kanál každý přes svůj vlastní,
+        // nezávislý MonoChannel (viz BuildOutput). Null, pokud zdroj není stereo
+        // (StereoMonoChannelSampleProvider by jinak stejně odmítl).
+        private StereoMonoChannelSampleProvider? _stereoChannelStrip;
+
+        /// <summary>krok88: kanálový pás levého kanálu (Gain/HPF/Gate/Comp/EQ) - null, pokud právě přehrávaný soubor není stereo.</summary>
+        public MonoChannel? LeftChannelStrip => _stereoChannelStrip?.Left;
+
+        /// <summary>krok88: kanálový pás pravého kanálu (Gain/HPF/Gate/Comp/EQ) - null, pokud právě přehrávaný soubor není stereo.</summary>
+        public MonoChannel? RightChannelStrip => _stereoChannelStrip?.Right;
+
+        /// <summary>krok89: skutečný 32pásmový ekvalizér levého kanálu - null, pokud právě přehrávaný soubor není stereo.</summary>
+        public GraphicEqualizer32Band? LeftEq32 => _stereoChannelStrip?.LeftEq32;
+
+        /// <summary>krok89: skutečný 32pásmový ekvalizér pravého kanálu - null, pokud právě přehrávaný soubor není stereo.</summary>
+        public GraphicEqualizer32Band? RightEq32 => _stereoChannelStrip?.RightEq32;
+
+        /// <summary>krok96: skutečný spektrální analyzér levého kanálu (za ekvalizérem) - null, pokud právě přehrávaný soubor není stereo.</summary>
+        public SpectrumAnalyzer32Band? LeftAnalyzer32 => _stereoChannelStrip?.LeftAnalyzer32;
+
+        /// <summary>krok96: skutečný spektrální analyzér pravého kanálu (za ekvalizérem) - null, pokud právě přehrávaný soubor není stereo.</summary>
+        public SpectrumAnalyzer32Band? RightAnalyzer32 => _stereoChannelStrip?.RightAnalyzer32;
+
+        /// <summary>
+        /// krok101: živé místo odběru obou analyzérů - false (výchozí) = za
+        /// ekvalizérem, true = před ekvalizérem (viz StereoMonoChannelSampleProvider.
+        /// AnalyzerTapPreEq). Pokud právě nehraje stereo soubor, nastavení se jen
+        /// tiše neuplatní (get vrátí false) - FileBrowserWindow si ale svoje
+        /// přání pamatuje ve vlastním poli a po každém Load() ho sem znovu pošle.
+        /// </summary>
+        public bool AnalyzerTapPreEq
+        {
+            get => _stereoChannelStrip?.AnalyzerTapPreEq ?? false;
+            set { if (_stereoChannelStrip != null) _stereoChannelStrip.AnalyzerTapPreEq = value; }
+        }
 
         // NOVÉ: ladění změnou rychlosti (varispeed). 1.0 = beze změny.
         // Hodnota se pamatuje i mezi soubory - nastaví se jednou (SetSpeedFactor)
@@ -121,6 +159,20 @@ namespace PS150.UI.Windows
             _meteringProvider = new MeteringSampleProvider(chain);
             _meteringProvider.StreamVolume += OnStreamVolume;
 
+            // krok88: zkušební zapojení dvou nezávislých MonoChannel (L a P) -
+            // viz PS150.Core.Mixers.StereoMonoChannelSampleProvider. Jen když je
+            // zdroj stereo (mono soubory tudy beze změny). Metering zůstává
+            // PŘED tímhle zpracováním (pre-fader, viz komentář výš) - VU metr
+            // tak pořád ukazuje SUROVOU úroveň souboru, ne po Gain/HPF/Gate/
+            // Comp/EQ zpracování.
+            ISampleProvider postChannelStrip = _meteringProvider;
+            _stereoChannelStrip = null;
+            if (_meteringProvider.WaveFormat.Channels == 2)
+            {
+                _stereoChannelStrip = new StereoMonoChannelSampleProvider(_meteringProvider);
+                postChannelStrip = _stereoChannelStrip;
+            }
+
             // 2. Výstup: síť, je-li externí zvukovka k dispozici; jinak (nebo při
             //    jakékoliv chybě) zvukovka počítače.
             bool network = false;
@@ -129,7 +181,7 @@ namespace PS150.UI.Windows
             {
                 try
                 {
-                    _route = CreateNetworkRoute(_meteringProvider);
+                    _route = CreateNetworkRoute(postChannelStrip);
                     network = true;
                 }
                 catch (Exception ex)
@@ -140,7 +192,7 @@ namespace PS150.UI.Windows
                 }
             }
 
-            _route ??= new WasapiRoute(_meteringProvider);
+            _route ??= new WasapiRoute(postChannelStrip);
             _routeIsNetwork = network;
             _route.Ended += OnRouteEnded;
         }

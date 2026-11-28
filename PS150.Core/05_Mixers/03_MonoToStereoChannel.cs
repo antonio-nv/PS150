@@ -3,13 +3,13 @@
 namespace PS150.Core.Mixers
 {
     /// <summary>
-    /// krok82: jeden mixpultový kanál - zatím jen Gain (vstupní trim) a Pan (viz
-    /// formulář mixpultu: Gain Pan Gate Comp HPF E.Ga E.Fr E.Q). Gate/Comp/HPF/EQ
-    /// přibudou v dalších krocích, tohle je úmyslně nejjednodušší možný první kus.
-    ///
-    /// Vstup je jeden (mono) vzorek - typické pro varhanní hlas/rejstřík, který je
-    /// sám o sobě mono a do sterea se rozmístí panorámou až tady v mixpultu.
-    /// Výstup je dvojice (L, P).
+    /// krok82/85: SPECIALIZOVANÝ mixpultový kanál - jeden mono vstup, stereo výstup
+    /// s Pan (umístění v stereo poli). Přejmenováno z původního MixerChannel
+    /// (krok82), protože se ukázalo, že tohle NENÍ ten základní/výchozí typ kanálu -
+    /// pro domácí přehrávání na reprobednách je výchozí MonoChannel (mono-mono,
+    /// viz tam) nebo StereoChannel (stereo-stereo, viz tam). Tenhle typ se hodí
+    /// spíš pro speciální případy jako sluchátkový výstup, kde dává smysl umístit
+    /// mono zdroj (mikrofon, syntezátor, varhanní hlas) někam do stereo prostoru.
     ///
     /// Gain: standardní převod dB -> lineární násobič (10^(dB/20)).
     ///
@@ -19,12 +19,10 @@ namespace PS150.Core.Mixers
     /// lineárního rozdělení L=1-p, P=p) - jinak by se při otáčení panorámy zdálo,
     /// že uprostřed zvuk "propadne" (je tišší, než na krajích). Proto se použije
     /// sin/cos křivka: L = cos(úhel), P = sin(úhel), úhel 0..π/2 pro pan -1..+1.
-    ///
-    /// Gain a Pan nemají mezi vzorky žádný stav (nejsou to filtry), takže skoková
-    /// změna hodnoty za chodu je v pořádku - na rozdíl od Gate/Comp, které budou
-    /// potřebovat plynulou obálku (attack/release), to přijde v dalším kroku.
+    /// (Porovnej se StereoChannel.Balance, která žádnou kompenzaci nepoužívá -
+    /// tam totiž žádná potřeba není, viz komentář tam.)
     /// </summary>
-    public sealed class MixerChannel
+    public sealed class MonoToStereoChannel
     {
         public const double MinGainDb = -24.0;
         public const double MaxGainDb = 24.0;
